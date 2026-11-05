@@ -104,11 +104,126 @@ func resetText(_ date: Date?) -> String {
     }
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "fr_FR")
+    if left >= 7 * 86400 {
+        formatter.dateFormat = "d MMM"
+        return "Réinitialisation le " + formatter.string(from: date)
+    }
     formatter.dateFormat = "EEE HH:mm"
     return "Réinitialisation " + formatter.string(from: date)
 }
 
 func percentText(_ value: Double) -> String { "\(Int(value.rounded())) %" }
+
+// Une partie du widget par outil suivi.
+final class Section {
+    let name: String
+    var visible = true
+    var limits: [Limit] = []
+    var message: String? = "Chargement…"
+    var loginNeeded = false
+    var lastOk: Date?
+
+    init(name: String) { self.name = name }
+}
+
+// Codex donne lui-meme ses limites via son app-server : il garde sa connexion, le widget ne voit aucun jeton.
+enum CodexClient {
+    static func findExecutable() -> String? {
+        let home = NSHomeDirectory()
+        let candidates = [
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            home + "/.local/bin/codex",
+            home + "/.npm-global/bin/codex",
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    static func read() -> (limits: [Limit]?, error: String?) {
+        guard let executable = findExecutable() else { return (nil, "Codex introuvable sur ce Mac") }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["app-server"]
+        // Une app lancee depuis le Finder n'a pas le PATH du terminal : codex installe par npm a besoin de node.
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (environment["PATH"] ?? "")
+        process.environment = environment
+
+        let input = Pipe()
+        let output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        do { try process.run() } catch { return (nil, "Lecture Codex impossible") }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 20) {
+            if process.isRunning { process.terminate() }
+        }
+
+        var buffer = Data()
+        func send(_ json: String) { input.fileHandleForWriting.write(Data((json + "\n").utf8)) }
+        func response(_ id: Int) -> [String: Any]? {
+            while true {
+                while let newline = buffer.firstIndex(of: 10) {
+                    let line = buffer.subdata(in: buffer.startIndex..<newline)
+                    buffer.removeSubrange(buffer.startIndex...newline)
+                    if let message = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+                       (message["id"] as? NSNumber)?.intValue == id {
+                        return message
+                    }
+                }
+                let chunk = output.fileHandleForReading.availableData
+                if chunk.isEmpty { return nil }
+                buffer.append(chunk)
+            }
+        }
+
+        send(#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"claude_usage_widget","title":"Claude Usage Widget","version":"1.0"}}}"#)
+        guard response(1) != nil else { process.terminate(); return (nil, "Codex ne répond pas") }
+        send(#"{"method":"initialized"}"#)
+        send(#"{"method":"account/rateLimits/read","id":2}"#)
+        let reply = response(2)
+        try? input.fileHandleForWriting.close()
+        if process.isRunning { process.terminate() }
+
+        guard let reply = reply else { return (nil, "Codex ne répond pas") }
+        guard let result = reply["result"] as? [String: Any] else { return (nil, "Ouvre Codex et connecte-toi") }
+        let rows = limits(from: result)
+        return rows.isEmpty ? (nil, "Aucune limite Codex pour ce compte") : (rows, nil)
+    }
+
+    static func limits(from result: [String: Any]) -> [Limit] {
+        guard let rateLimits = result["rateLimits"] as? [String: Any] else { return [] }
+        return ["primary", "secondary"].compactMap { key in
+            guard let window = rateLimits[key] as? [String: Any],
+                  let used = (window["usedPercent"] as? NSNumber)?.doubleValue, used.isFinite, used >= 0 else { return nil }
+            let reset = (window["resetsAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+            let minutes = (window["windowDurationMins"] as? NSNumber)?.doubleValue
+            return Limit(label: label(minutes: minutes), percent: min(used, 100), resetsAt: reset)
+        }
+    }
+
+    private static func label(minutes: Double?) -> String {
+        guard let m = minutes else { return "Limite" }
+        if abs(m - 300) <= 30 { return "Session" }
+        if abs(m - 1440) <= 144 { return "Jour" }
+        if abs(m - 10080) <= 1008 { return "Semaine" }
+        if abs(m - 43200) <= 4320 { return "Mois" }
+        return "Limite"
+    }
+}
+
+// Transporte le resultat de Codex du fil d'arriere-plan vers l'interface.
+final class CodexResultBox: NSObject {
+    let limits: [Limit]?
+    let error: String?
+    init(_ result: (limits: [Limit]?, error: String?)) {
+        limits = result.limits
+        error = result.error
+    }
+}
 
 // ---------- Vue du widget ----------
 
@@ -118,11 +233,10 @@ final class WidgetView: NSView {
     static let rowHeight: CGFloat = 46
     static let footerHeight: CGFloat = 18
     static let messageHeight: CGFloat = 44
+    static let headerHeight: CGFloat = 22
+    static let sectionGap: CGFloat = 10
 
-    var limits: [Limit] = []
-    var message: String? = "Chargement…"
-    var loginNeeded = false
-    var lastOk: Date?
+    var sections: [Section] = []
     var onClick: (() -> Void)?
     var contextMenu: NSMenu?
 
@@ -134,15 +248,21 @@ final class WidgetView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu }
 
-    var preferredHeight: CGFloat {
-        var height = Self.pad * 2
-        if limits.isEmpty {
-            height += Self.messageHeight
+    static func height(of section: Section) -> CGFloat {
+        var height = headerHeight
+        if section.limits.isEmpty {
+            height += messageHeight
         } else {
-            height += CGFloat(limits.count) * Self.rowHeight - 6
-            if message != nil { height += Self.footerHeight }
+            height += CGFloat(section.limits.count) * rowHeight - 6
+            if section.message != nil { height += footerHeight }
         }
         return height
+    }
+
+    var preferredHeight: CGFloat {
+        let shown = sections.filter { $0.visible }
+        if shown.isEmpty { return Self.pad * 2 + Self.messageHeight }
+        return Self.pad * 2 + shown.map { Self.height(of: $0) }.reduce(0, +) + CGFloat(shown.count - 1) * Self.sectionGap
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -177,18 +297,35 @@ final class WidgetView: NSView {
         let width = bounds.width - 2 * Self.pad
         var y = Self.pad
 
-        for limit in limits {
+        let shown = sections.filter { $0.visible }
+        if shown.isEmpty {
+            draw("Clic droit pour choisir Claude ou Codex", font: .systemFont(ofSize: 12), color: Self.muted,
+                 in: NSRect(x: x, y: y, width: width, height: Self.messageHeight))
+        }
+        for (index, section) in shown.enumerated() {
+            if index > 0 { y += Self.sectionGap }
+            drawSection(section, x: x, y: y, width: width)
+            y += Self.height(of: section)
+        }
+    }
+
+    private func drawSection(_ section: Section, x: CGFloat, y top: CGFloat, width: CGFloat) {
+        draw(section.name, font: .systemFont(ofSize: 12, weight: .semibold), color: Self.muted,
+             in: NSRect(x: x, y: top, width: width, height: Self.headerHeight))
+        var y = top + Self.headerHeight
+
+        for limit in section.limits {
             drawRow(limit, x: x, y: y, width: width)
             y += Self.rowHeight
         }
 
-        if limits.isEmpty {
-            let color: NSColor = loginNeeded ? Self.accent : Self.muted
-            draw(message ?? "", font: .systemFont(ofSize: 12), color: color,
+        if section.limits.isEmpty {
+            let color: NSColor = section.loginNeeded ? Self.accent : Self.muted
+            draw(section.message ?? "", font: .systemFont(ofSize: 12), color: color,
                  in: NSRect(x: x, y: y, width: width, height: Self.messageHeight))
-        } else if let message = message {
+        } else if let message = section.message {
             var text = message
-            if let lastOk = lastOk {
+            if let lastOk = section.lastOk {
                 let minutes = Int(-lastOk.timeIntervalSinceNow / 60)
                 if minutes >= 1 { text += " · il y a \(minutes) min" }
             }
@@ -252,6 +389,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var panel: NSPanel!
     private let widget = WidgetView(frame: NSRect(x: 0, y: 0, width: WidgetView.width, height: 96))
     private let menu = NSMenu()
+    private let claude = Section(name: "Claude")
+    private let codex = Section(name: "Codex")
+    private var codexBusy = false
+    private var lastRefresh = Date.distantPast
 
     private var web: WKWebView!
     private var browserWindow: NSWindow!
@@ -280,14 +421,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         menu.delegate = self
         statusItem.menu = menu
 
+        // Sans reglage : on affiche ce qui est detecte, pour ne pas demander une connexion Claude a qui n'utilise que Codex.
+        let codexFound = CodexClient.findExecutable() != nil
+        let defaults = UserDefaults.standard
+        let claudeAppInstalled = FileManager.default.fileExists(atPath: "/Applications/Claude.app")
+        claude.visible = defaults.object(forKey: "showClaude") as? Bool ?? (claudeAppInstalled || !codexFound)
+        codex.visible = defaults.object(forKey: "showCodex") as? Bool ?? codexFound
+        widget.sections = [claude, codex]
+
         buildPanel()
         buildBrowser()
 
-        Timer.scheduledTimer(timeInterval: pollInterval, target: self, selector: #selector(pollNow),
+        Timer.scheduledTimer(timeInterval: pollInterval, target: self, selector: #selector(refreshAll),
                              userInfo: nil, repeats: true)
         Timer.scheduledTimer(timeInterval: 30, target: self, selector: #selector(repaint),
                              userInfo: nil, repeats: true)
+        refreshDisplay()
+        refreshAll()
+    }
+
+    @objc private func refreshAll() {
+        lastRefresh = Date()
         pollNow()
+        pollCodex()
+    }
+
+    private func pollCodex() {
+        guard codex.visible, !codexBusy else { return }
+        codexBusy = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let box = CodexResultBox(CodexClient.read())
+            self?.performSelector(onMainThread: #selector(AppDelegate.codexFinished(_:)), with: box, waitUntilDone: false)
+        }
+    }
+
+    @objc private func codexFinished(_ box: CodexResultBox) {
+        codexBusy = false
+        if let limits = box.limits {
+            codex.limits = limits
+            codex.message = nil
+            codex.lastOk = Date()
+        } else {
+            codex.message = box.error
+        }
+        refreshDisplay()
     }
 
     // Fenetre sans focus : elle ne devient jamais active et n'apparait pas par-dessus un jeu en plein ecran.
@@ -340,7 +517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // ---------- Donnees ----------
 
     @objc private func pollNow() {
-        guard !loginVisible, step == .none else { return }
+        guard claude.visible, !loginVisible, step == .none else { return }
         lastPoll = Date()
         startWatchdog()
         if let orgId = orgId?.addingPercentEncoding(withAllowedCharacters: .alphanumerics) {
@@ -365,7 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     @objc private func watchdogFired() {
         finishPoll()
-        if widget.limits.isEmpty {
+        if claude.limits.isEmpty {
             showLoginNeeded("Vérification requise : clique pour ouvrir claude.ai")
         } else {
             showProblem("claude.ai ne répond pas")
@@ -440,10 +617,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         if rows.isEmpty {
             showProblem("Aucune limite dans la réponse")
         } else {
-            widget.limits = rows
-            widget.message = nil
-            widget.loginNeeded = false
-            widget.lastOk = Date()
+            claude.limits = rows
+            claude.message = nil
+            claude.loginNeeded = false
+            claude.lastOk = Date()
             refreshDisplay()
         }
     }
@@ -451,10 +628,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // ---------- Connexion ----------
 
     private func widgetClicked() {
-        if widget.loginNeeded {
+        if claude.visible && claude.loginNeeded {
             openLogin()
-        } else if -lastPoll.timeIntervalSinceNow > 10 {
-            pollNow()
+        } else if -lastRefresh.timeIntervalSinceNow > 10 {
+            refreshAll()
         }
     }
 
@@ -497,15 +674,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // ---------- Affichage ----------
 
     private func showProblem(_ text: String) {
-        widget.loginNeeded = false
-        widget.message = text
+        claude.loginNeeded = false
+        claude.message = text
         refreshDisplay()
     }
 
     private func showLoginNeeded(_ text: String) {
-        widget.loginNeeded = true
-        widget.limits = []
-        widget.message = text
+        claude.loginNeeded = true
+        claude.limits = []
+        claude.message = text
         refreshDisplay()
     }
 
@@ -514,11 +691,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func refreshDisplay() {
-        if widget.limits.isEmpty {
-            statusItem.button?.title = widget.loginNeeded ? "Claude ?" : "Claude…"
-        } else {
-            statusItem.button?.title = widget.limits.prefix(2).map { percentText($0.percent) }.joined(separator: " · ")
+        // Barre de menu : le premier pourcentage de chaque outil affiche.
+        let parts = widget.sections.filter { $0.visible }.compactMap { section -> String? in
+            guard let first = section.limits.first else { return nil }
+            return "\(section.name.prefix(2)) \(percentText(first.percent))"
         }
+        statusItem.button?.title = parts.isEmpty ? (claude.visible && claude.loginNeeded ? "Claude ?" : "Claude…")
+                                                 : parts.joined(separator: " · ")
 
         // Le coin haut gauche reste fixe quand le nombre de lignes change.
         let height = widget.preferredHeight
@@ -534,18 +713,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        for limit in widget.limits {
-            let reset = resetText(limit.resetsAt)
-            let suffix = reset.isEmpty ? "" : " — " + reset
-            menu.addItem(NSMenuItem(title: "\(limit.label) : \(percentText(limit.percent))\(suffix)", action: nil, keyEquivalent: ""))
-        }
-        if let message = widget.message {
-            menu.addItem(NSMenuItem(title: message, action: nil, keyEquivalent: ""))
+        for section in widget.sections where section.visible {
+            for limit in section.limits {
+                let reset = resetText(limit.resetsAt)
+                let suffix = reset.isEmpty ? "" : " — " + reset
+                menu.addItem(NSMenuItem(title: "\(section.name) · \(limit.label) : \(percentText(limit.percent))\(suffix)",
+                                        action: nil, keyEquivalent: ""))
+            }
+            if let message = section.message {
+                menu.addItem(NSMenuItem(title: "\(section.name) : \(message)", action: nil, keyEquivalent: ""))
+            }
         }
         menu.addItem(.separator())
 
-        add("Actualiser", #selector(pollNow))
-        add("Se connecter / changer de compte", #selector(openLogin))
+        add("Actualiser", #selector(refreshAll))
+        add("Claude : se connecter / changer de compte", #selector(openLogin))
+        menu.addItem(.separator())
+        add("Afficher Claude", #selector(toggleClaude), checked: claude.visible)
+        add("Afficher Codex", #selector(toggleCodex), checked: codex.visible)
         menu.addItem(.separator())
         add("Afficher le widget sur le bureau", #selector(toggleWidget), checked: showWidget)
         add("Toujours au premier plan", #selector(toggleTopMost), checked: alwaysOnTop)
@@ -560,6 +745,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         item.target = self
         item.state = checked ? .on : .off
         menu.addItem(item)
+    }
+
+    @objc private func toggleClaude() {
+        claude.visible.toggle()
+        UserDefaults.standard.set(claude.visible, forKey: "showClaude")
+        if claude.visible { pollNow() } else { finishPoll() }
+        refreshDisplay()
+    }
+
+    @objc private func toggleCodex() {
+        codex.visible.toggle()
+        UserDefaults.standard.set(codex.visible, forKey: "showCodex")
+        pollCodex()
+        refreshDisplay()
     }
 
     @objc private func toggleWidget() {

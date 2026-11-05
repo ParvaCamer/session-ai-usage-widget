@@ -434,9 +434,77 @@ namespace ClaudeUsage
         }
     }
 
+    // Petite mascotte en pixel art, dessinee par le code. Ce ne sont pas les logos officiels.
+    // '#' corps, 'x' interieur, 'o' details (yeux, symboles), '.' transparent.
+    class Mascot
+    {
+        public string[] Pixels;
+        public Color Body;
+        public Color Inner;
+        public Color Detail;
+
+        public static readonly Mascot Claude = new Mascot
+        {
+            Pixels = new[]
+            {
+                "...##...",
+                "..####..",
+                ".######.",
+                ".#o##o#.",
+                ".######.",
+                ".######.",
+                "..####..",
+                ".#....#.",
+            },
+            Body = Color.FromArgb(217, 119, 87),
+            Inner = Color.FromArgb(217, 119, 87),
+            Detail = Color.FromArgb(31, 30, 29),
+        };
+
+        public static readonly Mascot Codex = new Mascot
+        {
+            Pixels = new[]
+            {
+                "########",
+                "#xxxxxx#",
+                "#oxxxxx#",
+                "#xoxxxx#",
+                "#oxxoox#",
+                "#xxxxxx#",
+                "########",
+                "..#..#..",
+            },
+            Body = Color.FromArgb(138, 180, 248),
+            Inner = Color.FromArgb(27, 39, 51),
+            Detail = Color.FromArgb(232, 234, 237),
+        };
+
+        public void Draw(Graphics g, float x, float y, int pixel)
+        {
+            SmoothingMode previous = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.None;
+            using (var body = new SolidBrush(Body))
+            using (var inner = new SolidBrush(Inner))
+            using (var detail = new SolidBrush(Detail))
+            {
+                for (int row = 0; row < Pixels.Length; row++)
+                {
+                    for (int col = 0; col < Pixels[row].Length; col++)
+                    {
+                        char c = Pixels[row][col];
+                        Brush b = c == '#' ? body : c == 'x' ? inner : c == 'o' ? detail : null;
+                        if (b != null) g.FillRectangle(b, (int)x + col * pixel, (int)y + row * pixel, pixel, pixel);
+                    }
+                }
+            }
+            g.SmoothingMode = previous;
+        }
+    }
+
     // Une colonne d'informations par outil suivi.
     class Section
     {
+        public Mascot Mascot;
         public string Name;
         public bool Visible;
         public List<Limit> Rows = new List<Limit>();
@@ -525,8 +593,8 @@ namespace ClaudeUsage
         readonly ToolStripMenuItem topMostItem = new ToolStripMenuItem("Toujours au premier plan");
         readonly ToolStripMenuItem autoStartItem = new ToolStripMenuItem("Se lancer avec l'app Claude ou Codex");
 
-        readonly Section claude = new Section { Name = "Claude" };
-        readonly Section codex = new Section { Name = "Codex" };
+        readonly Section claude = new Section { Name = "Claude", Mascot = Mascot.Claude };
+        readonly Section codex = new Section { Name = "Codex", Mascot = Mascot.Codex };
         readonly ToolStripMenuItem showClaudeItem = new ToolStripMenuItem("Afficher Claude");
         readonly ToolStripMenuItem showCodexItem = new ToolStripMenuItem("Afficher Codex");
         bool codexBusy;
@@ -1042,13 +1110,15 @@ namespace ClaudeUsage
 
         void DrawSection(Graphics g, Section s, float x, float y, float w)
         {
+            int pixel = Math.Max(2, S(2));
+            s.Mascot.Draw(g, x, y + (S(HeaderHeight) - 8 * pixel) / 2f - S(2), pixel);
             using (var main = new SolidBrush(TextMuted))
-                DrawText(g, s.Name, fontValue, main, x, y, w, S(HeaderHeight));
+                DrawText(g, s.Name, fontValue, main, x + 8 * pixel + S(6), y, w, S(HeaderHeight));
             y += S(HeaderHeight);
 
             foreach (Limit row in s.Rows)
             {
-                DrawRow(g, row, x, y, w);
+                DrawRow(g, row, x, y, w, s.Mascot.Body);
                 y += S(RowHeight);
             }
 
@@ -1072,10 +1142,10 @@ namespace ClaudeUsage
             return minutes < 1 ? s.Message : s.Message + " · il y a " + minutes + " min";
         }
 
-        void DrawRow(Graphics g, Limit row, float x, float y, float w)
+        void DrawRow(Graphics g, Limit row, float x, float y, float w, Color normal)
         {
             string value = Math.Round(row.Percent).ToString(CultureInfo.InvariantCulture) + " %";
-            Color color = row.Percent >= 90 ? Danger : row.Percent >= 70 ? Warn : Accent;
+            Color color = row.Percent >= 90 ? Danger : row.Percent >= 70 ? Warn : normal;
 
             float valueW = g.MeasureString(value, fontValue).Width;
             using (var main = new SolidBrush(TextMain))

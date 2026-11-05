@@ -1,8 +1,15 @@
 # Widget d'utilisation Claude
 
-Affiche en permanence le pourcentage utilisé de ton forfait Claude (session et semaine) et le moment de la réinitialisation.
+Affiche en permanence le pourcentage utilisé de tes forfaits **Claude** et **Codex** (session, semaine ou mois selon le forfait) et le moment de la réinitialisation.
 
-Projet personnel non officiel, sans lien avec Anthropic.
+Projet personnel non officiel, sans lien avec Anthropic ni OpenAI. Les petites mascottes en pixel art sont des créations originales, pas les logos officiels.
+
+## Quels outils ?
+
+- **Claude :** connecte-toi une fois à claude.ai en cliquant sur le widget.
+- **Codex :** rien à faire si Codex (l'app ou la ligne de commande) est installé et connecté. Le widget lui demande ses limites directement, sans connexion de son côté.
+
+Le menu (clic droit, ou barre de menu sur Mac) permet de cocher les outils à afficher. Au premier lancement, seuls ceux qui sont détectés sur l'ordinateur s'affichent.
 
 ## macOS (13 ou plus récent)
 
@@ -28,15 +35,16 @@ Les 3 DLL doivent rester à côté du `.exe`. Si « Continuer avec Google » est
 | --- | --- |
 | Glisser | Déplace le widget (position mémorisée) |
 | Clic | Actualise, ou ouvre la connexion si elle est demandée |
-| Clic droit | Menu : actualiser, compte, premier plan, lancement avec l'app Claude, quitter |
+| Clic droit | Menu : actualiser, compte Claude, outils affichés, premier plan, lancement automatique, quitter |
 
 **Pendant un jeu :** le widget se masque seulement si le plein écran occupe le même écran que lui, et réapparaît sans prendre le focus. Sur l'autre écran, il reste affiché et continue de se mettre à jour. Une vidéo en plein écran a le même effet.
 
-**Avec l'app Claude :** l'option « Se lancer avec l'app Claude » démarre le widget avec Windows. Il reste invisible et presque sans consommation tant que l'app est fermée, puis apparaît quand tu l'ouvres, quelle que soit la façon de l'ouvrir. L'app Claude réduite dans la zone de notification compte comme ouverte. Si tu cliques sur « Quitter », le widget ne revient qu'au prochain démarrage de Windows, ou en relançant le `.exe`. Cette option n'existe que sous Windows.
+**Avec l'app Claude ou Codex :** l'option « Se lancer avec l'app Claude ou Codex » démarre le widget avec Windows. Il reste invisible et presque sans consommation tant qu'aucune des deux apps cochées n'est ouverte, puis apparaît quand tu en ouvres une, quelle que soit la façon de l'ouvrir. Une app réduite dans la zone de notification compte comme ouverte. Si tu cliques sur « Quitter », le widget ne revient qu'au prochain démarrage de Windows, ou en relançant le `.exe`. Cette option n'existe que sous Windows.
 
 ## Bon à savoir
 
-- **Source des données :** la même adresse que la page Paramètres > Utilisation de claude.ai, lue toutes les 2 minutes avec ta propre session. Elle n'est pas documentée par Anthropic et peut changer sans préavis, ce qui casserait le widget. À toi de voir si cet usage te convient au regard des conditions d'utilisation de Claude.
+- **Codex :** les limites viennent de Codex lui-même (son app-server), lancé en arrière-plan sans fenêtre toutes les 2 minutes. Le widget ne lit ni ne stocke aucun jeton Codex.
+- **Claude :** la même adresse que la page Paramètres > Utilisation de claude.ai, lue toutes les 2 minutes avec ta propre session. Elle n'est pas documentée par Anthropic et peut changer sans préavis, ce qui casserait le widget. À toi de voir si cet usage te convient au regard des conditions d'utilisation de Claude.
 - **Ta connexion :** le widget ne voit pas ton mot de passe et ne contacte que claude.ai pour lire tes chiffres. La session reste sur ta machine, comme dans un navigateur :
   - Windows : `%LOCALAPPDATA%\ClaudeUsageWidget\web`
   - macOS : données WebKit de l'application
@@ -47,7 +55,7 @@ Les 3 DLL doivent rester à côté du `.exe`. Si « Continuer avec Google » est
 
 **Windows**
 
-1. Clic droit sur le widget : décoche « Se lancer avec l'app Claude », puis Quitter.
+1. Clic droit sur le widget : décoche « Se lancer avec l'app Claude ou Codex », puis Quitter.
 2. Supprime ce dossier et `%LOCALAPPDATA%\ClaudeUsageWidget` (efface aussi ta session).
 
 **macOS**

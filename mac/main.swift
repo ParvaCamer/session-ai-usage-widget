@@ -114,16 +114,69 @@ func resetText(_ date: Date?) -> String {
 
 func percentText(_ value: Double) -> String { "\(Int(value.rounded())) %" }
 
+// Petite mascotte en pixel art, dessinee par le code. Ce ne sont pas les logos officiels.
+// '#' corps, 'x' interieur, 'o' details (yeux, symboles), '.' transparent.
+struct Mascot {
+    let pixels: [String]
+    let body: NSColor
+    let inner: NSColor
+    let detail: NSColor
+
+    static let claude = Mascot(
+        pixels: ["...##...", "..####..", ".######.", ".#o##o#.", ".######.", ".######.", "..####..", ".#....#."],
+        body: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1),
+        inner: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1),
+        detail: NSColor(srgbRed: 31 / 255, green: 30 / 255, blue: 29 / 255, alpha: 1))
+
+    static let codex = Mascot(
+        pixels: ["########", "#xxxxxx#", "#oxxxxx#", "#xoxxxx#", "#oxxoox#", "#xxxxxx#", "########", "..#..#.."],
+        body: NSColor(srgbRed: 138 / 255, green: 180 / 255, blue: 248 / 255, alpha: 1),
+        inner: NSColor(srgbRed: 27 / 255, green: 39 / 255, blue: 51 / 255, alpha: 1),
+        detail: NSColor(srgbRed: 232 / 255, green: 234 / 255, blue: 237 / 255, alpha: 1))
+
+    // Dessine dans un repere ou y descend (vue retournee).
+    func draw(at origin: NSPoint, pixel: CGFloat) {
+        for (row, line) in pixels.enumerated() {
+            for (col, character) in line.enumerated() {
+                let color: NSColor?
+                switch character {
+                case "#": color = body
+                case "x": color = inner
+                case "o": color = detail
+                default: color = nil
+                }
+                if let color = color {
+                    color.setFill()
+                    NSRect(x: origin.x + CGFloat(col) * pixel, y: origin.y + CGFloat(row) * pixel,
+                           width: pixel, height: pixel).fill()
+                }
+            }
+        }
+    }
+
+    func image(pixel: CGFloat) -> NSImage {
+        let mascot = self
+        return NSImage(size: NSSize(width: 8 * pixel, height: 8 * pixel), flipped: true) { _ in
+            mascot.draw(at: .zero, pixel: pixel)
+            return true
+        }
+    }
+}
+
 // Une partie du widget par outil suivi.
 final class Section {
     let name: String
+    let mascot: Mascot
     var visible = true
     var limits: [Limit] = []
     var message: String? = "Chargement…"
     var loginNeeded = false
     var lastOk: Date?
 
-    init(name: String) { self.name = name }
+    init(name: String, mascot: Mascot) {
+        self.name = name
+        self.mascot = mascot
+    }
 }
 
 // Codex donne lui-meme ses limites via son app-server : il garde sa connexion, le widget ne voit aucun jeton.
@@ -310,12 +363,13 @@ final class WidgetView: NSView {
     }
 
     private func drawSection(_ section: Section, x: CGFloat, y top: CGFloat, width: CGFloat) {
+        section.mascot.draw(at: NSPoint(x: x, y: top + 1), pixel: 2)
         draw(section.name, font: .systemFont(ofSize: 12, weight: .semibold), color: Self.muted,
-             in: NSRect(x: x, y: top, width: width, height: Self.headerHeight))
+             in: NSRect(x: x + 22, y: top, width: width - 22, height: Self.headerHeight))
         var y = top + Self.headerHeight
 
         for limit in section.limits {
-            drawRow(limit, x: x, y: y, width: width)
+            drawRow(limit, x: x, y: y, width: width, normal: section.mascot.body)
             y += Self.rowHeight
         }
 
@@ -341,7 +395,7 @@ final class WidgetView: NSView {
     static let muted = NSColor(srgbRed: 166 / 255, green: 163 / 255, blue: 154 / 255, alpha: 1)
     static let track = NSColor(srgbRed: 58 / 255, green: 56 / 255, blue: 52 / 255, alpha: 1)
 
-    private func drawRow(_ limit: Limit, x: CGFloat, y: CGFloat, width: CGFloat) {
+    private func drawRow(_ limit: Limit, x: CGFloat, y: CGFloat, width: CGFloat, normal: NSColor) {
         let value = percentText(limit.percent) as NSString
         let valueAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold),
@@ -357,7 +411,7 @@ final class WidgetView: NSView {
         Self.track.setFill()
         NSBezierPath(roundedRect: NSRect(x: x, y: barY, width: width, height: barHeight), xRadius: 2, yRadius: 2).fill()
 
-        let color = limit.percent >= 90 ? Self.danger : limit.percent >= 70 ? Self.warn : Self.accent
+        let color = limit.percent >= 90 ? Self.danger : limit.percent >= 70 ? Self.warn : normal
         let fill = width * CGFloat(limit.percent) / 100
         if fill > 0 {
             color.setFill()
@@ -389,8 +443,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var panel: NSPanel!
     private let widget = WidgetView(frame: NSRect(x: 0, y: 0, width: WidgetView.width, height: 96))
     private let menu = NSMenu()
-    private let claude = Section(name: "Claude")
-    private let codex = Section(name: "Codex")
+    private let claude = Section(name: "Claude", mascot: .claude)
+    private let codex = Section(name: "Codex", mascot: .codex)
     private var codexBusy = false
     private var lastRefresh = Date.distantPast
 
@@ -691,13 +745,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func refreshDisplay() {
-        // Barre de menu : le premier pourcentage de chaque outil affiche.
-        let parts = widget.sections.filter { $0.visible }.compactMap { section -> String? in
-            guard let first = section.limits.first else { return nil }
-            return "\(section.name.prefix(2)) \(percentText(first.percent))"
+        // Barre de menu : la mascotte et le premier pourcentage de chaque outil affiche.
+        let title = NSMutableAttributedString()
+        let font = NSFont.menuBarFont(ofSize: 0)
+        for section in widget.sections where section.visible {
+            guard let first = section.limits.first else { continue }
+            if title.length > 0 { title.append(NSAttributedString(string: "  ", attributes: [.font: font])) }
+            let attachment = NSTextAttachment()
+            attachment.image = section.mascot.image(pixel: 2)
+            attachment.bounds = NSRect(x: 0, y: -3, width: 16, height: 16)
+            title.append(NSAttributedString(attachment: attachment))
+            title.append(NSAttributedString(string: " " + percentText(first.percent), attributes: [.font: font]))
         }
-        statusItem.button?.title = parts.isEmpty ? (claude.visible && claude.loginNeeded ? "Claude ?" : "Claude…")
-                                                 : parts.joined(separator: " · ")
+        if title.length > 0 {
+            statusItem.button?.attributedTitle = title
+        } else {
+            statusItem.button?.title = claude.visible && claude.loginNeeded ? "Claude ?" : "Claude…"
+        }
 
         // Le coin haut gauche reste fixe quand le nombre de lignes change.
         let height = widget.preferredHeight

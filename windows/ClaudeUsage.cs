@@ -443,6 +443,13 @@ namespace ClaudeUsage
         public Color Inner;
         public Color Detail;
 
+        // Animation : les pattes alternent avec un petit rebond, et certaines cases clignotent.
+        public string LegsAlt;
+        public Point[] BlinkCells = new Point[0]; // X = colonne, Y = ligne
+        public char BlinkInto = '#';
+        public int BlinkPeriod;
+        public int BlinkLength;
+
         public static readonly Mascot Claude = new Mascot
         {
             Pixels = new[]
@@ -459,6 +466,11 @@ namespace ClaudeUsage
             Body = Color.FromArgb(217, 119, 87),
             Inner = Color.FromArgb(217, 119, 87),
             Detail = Color.FromArgb(31, 30, 29),
+            LegsAlt = "..#..#..",
+            BlinkCells = new[] { new Point(2, 3), new Point(5, 3) }, // les yeux
+            BlinkInto = '#',
+            BlinkPeriod = 40, // environ toutes les 5 secondes
+            BlinkLength = 2,
         };
 
         public static readonly Mascot Codex = new Mascot
@@ -477,10 +489,20 @@ namespace ClaudeUsage
             Body = Color.FromArgb(138, 180, 248),
             Inner = Color.FromArgb(27, 39, 51),
             Detail = Color.FromArgb(232, 234, 237),
+            LegsAlt = ".#....#.",
+            BlinkCells = new[] { new Point(4, 4), new Point(5, 4) }, // le curseur _
+            BlinkInto = 'x',
+            BlinkPeriod = 8, // une fois par seconde
+            BlinkLength = 4,
         };
 
-        public void Draw(Graphics g, float x, float y, int pixel)
+        // frame avance d'un cran toutes les 120 ms ; 0 donne la pose fixe.
+        public void Draw(Graphics g, float x, float y, int pixel, int frame)
         {
+            bool step = (frame / 4) % 2 == 1;
+            int bob = step ? -pixel : 0;
+            bool blink = BlinkPeriod > 0 && frame % BlinkPeriod < BlinkLength && frame > 0;
+
             SmoothingMode previous = g.SmoothingMode;
             g.SmoothingMode = SmoothingMode.None;
             using (var body = new SolidBrush(Body))
@@ -489,11 +511,13 @@ namespace ClaudeUsage
             {
                 for (int row = 0; row < Pixels.Length; row++)
                 {
-                    for (int col = 0; col < Pixels[row].Length; col++)
+                    string line = row == Pixels.Length - 1 && step && LegsAlt != null ? LegsAlt : Pixels[row];
+                    for (int col = 0; col < line.Length; col++)
                     {
-                        char c = Pixels[row][col];
+                        char c = line[col];
+                        if (blink && Array.IndexOf(BlinkCells, new Point(col, row)) >= 0) c = BlinkInto;
                         Brush b = c == '#' ? body : c == 'x' ? inner : c == 'o' ? detail : null;
-                        if (b != null) g.FillRectangle(b, (int)x + col * pixel, (int)y + row * pixel, pixel, pixel);
+                        if (b != null) g.FillRectangle(b, (int)x + col * pixel, (int)y + bob + row * pixel, pixel, pixel);
                     }
                 }
             }
@@ -588,6 +612,9 @@ namespace ClaudeUsage
         readonly System.Windows.Forms.Timer watchdog = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer repaintTimer = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer fullscreenTimer = new System.Windows.Forms.Timer();
+        readonly System.Windows.Forms.Timer animTimer = new System.Windows.Forms.Timer();
+        readonly List<Rectangle> mascotAreas = new List<Rectangle>();
+        int animFrame;
         readonly bool waitForApps;
         bool hiddenNow;
         readonly ToolStripMenuItem topMostItem = new ToolStripMenuItem("Toujours au premier plan");
@@ -631,6 +658,15 @@ namespace ClaudeUsage
             repaintTimer.Tick += delegate { Invalidate(); };
             fullscreenTimer.Interval = 3000;
             fullscreenTimer.Tick += delegate { UpdateState(); };
+
+            // Seules les mascottes sont redessinees, et rien du tout quand le widget est masque.
+            animTimer.Interval = 120;
+            animTimer.Tick += delegate
+            {
+                if (hiddenNow) return;
+                animFrame++;
+                foreach (Rectangle area in mascotAreas) Invalidate(area);
+            };
         }
 
         int S(float v) { return (int)Math.Round(v * scale); }
@@ -724,6 +760,7 @@ namespace ClaudeUsage
             pollTimer.Start();
             repaintTimer.Start();
             fullscreenTimer.Start();
+            animTimer.Start();
         }
 
         protected override void OnShown(EventArgs e)
@@ -1093,6 +1130,7 @@ namespace ClaudeUsage
             float y = S(Pad);
 
             int shown = 0;
+            mascotAreas.Clear();
             foreach (Section s in new[] { claude, codex })
             {
                 if (!s.Visible) continue;
@@ -1111,7 +1149,9 @@ namespace ClaudeUsage
         void DrawSection(Graphics g, Section s, float x, float y, float w)
         {
             int pixel = Math.Max(2, S(2));
-            s.Mascot.Draw(g, x, y + (S(HeaderHeight) - 8 * pixel) / 2f - S(2), pixel);
+            float mascotY = y + (S(HeaderHeight) - 8 * pixel) / 2f - S(2);
+            s.Mascot.Draw(g, x, mascotY, pixel, animFrame);
+            mascotAreas.Add(new Rectangle((int)x - 1, (int)mascotY - pixel - 1, 8 * pixel + 2, 9 * pixel + 2));
             using (var main = new SolidBrush(TextMuted))
                 DrawText(g, s.Name, fontValue, main, x + 8 * pixel + S(6), y, w, S(HeaderHeight));
             y += S(HeaderHeight);
@@ -1351,6 +1391,24 @@ namespace ClaudeUsage
             // Test sans reseau ni connexion : ClaudeUsage.exe --demo reponse.json image.png
             if (args.Length == 3 && args[0] == "--demo")
                 return RenderDemo(args[1], args[2]);
+
+            // Planche des poses animees, pour verifier l'animation sans fenetre.
+            if (args.Length == 2 && args[0] == "--demo-frames")
+            {
+                int[] frames = { 0, 4, 40, 41, 2, 6 };
+                using (var bmp = new Bitmap(frames.Length * 26 + 4, 2 * 26 + 4))
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(Color.FromArgb(31, 30, 29));
+                    for (int i = 0; i < frames.Length; i++)
+                    {
+                        Mascot.Claude.Draw(g, 4 + i * 26, 6, 2, frames[i]);
+                        Mascot.Codex.Draw(g, 4 + i * 26, 32, 2, frames[i]);
+                    }
+                    bmp.Save(args[1], ImageFormat.Png);
+                }
+                return 0;
+            }
 
             // Diagnostic sans fenetre : ClaudeUsage.exe --check-codex resultat.txt
             if (args.Length == 2 && args[0] == "--check-codex")

@@ -1,0 +1,62 @@
+name: Release
+
+# Pour publier une version : git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compiler
+        shell: cmd
+        run: windows\build.bat
+      - name: Assembler le zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory ClaudeUsage | Out-Null
+          Copy-Item windows\ClaudeUsage.exe, windows\*.dll, windows\WebView2-*.txt, LICENSE -Destination ClaudeUsage
+          Compress-Archive -Path ClaudeUsage -DestinationPath ClaudeUsage-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: ClaudeUsage-Windows.zip
+
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compiler pour Apple Silicon et Intel
+        run: UNIVERSAL=1 bash mac/build.sh
+      - name: Créer le dmg
+        run: |
+          mkdir dmg
+          cp -R "mac/Claude Usage.app" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "Claude Usage" -srcfolder dmg -ov -format UDZO ClaudeUsage-macOS.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: ClaudeUsage-macOS.dmg
+
+  release:
+    needs: [windows, mac]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publier la version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" ClaudeUsage-Windows.zip ClaudeUsage-macOS.dmg \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes "Installation : voir le README. Les fichiers ne sont pas signés : Windows et macOS affichent un avertissement au premier lancement, le README explique comment passer outre."

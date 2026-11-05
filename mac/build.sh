@@ -6,7 +6,16 @@ cd "$(dirname "$0")"
 APP="Claude Usage.app"
 mkdir -p "$APP/Contents/MacOS"
 
-swiftc -O main.swift -o "$APP/Contents/MacOS/ClaudeUsage"
+# UNIVERSAL=1 : un seul binaire pour les Mac Apple Silicon et Intel (utilisé pour le dmg publié).
+if [ "${UNIVERSAL:-0}" = "1" ]; then
+  WORK="$(mktemp -d)"
+  swiftc -O main.swift -target arm64-apple-macos13 -o "$WORK/arm64"
+  swiftc -O main.swift -target x86_64-apple-macos13 -o "$WORK/x86_64"
+  lipo -create "$WORK/arm64" "$WORK/x86_64" -output "$APP/Contents/MacOS/ClaudeUsage"
+  rm -rf "$WORK"
+else
+  swiftc -O main.swift -o "$APP/Contents/MacOS/ClaudeUsage"
+fi
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

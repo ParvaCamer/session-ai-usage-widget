@@ -11,6 +11,20 @@ Projet personnel non officiel, sans lien avec Anthropic ni OpenAI. Les petites m
 
 Le menu (clic droit, ou barre de menu sur Mac) permet de cocher les outils à afficher. Au premier lancement, seuls ceux qui sont détectés sur l'ordinateur s'affichent.
 
+## Téléchargement direct
+
+La page [Releases](https://github.com/ParvaCamer/claude-usage-widget/releases/latest) propose des fichiers prêts à l'emploi, fabriqués automatiquement par GitHub à partir de ce code :
+
+- **Windows :** `ClaudeUsage-Windows.zip`. Décompresse-le à l'endroit où il restera, puis lance `ClaudeUsage.exe`.
+- **macOS :** `ClaudeUsage-macOS.dmg`. Ouvre-le et glisse `Claude Usage` dans `Applications`. Il fonctionne sur les Mac Apple Silicon et Intel.
+
+Ces fichiers ne sont pas signés par un certificat payant, donc le système affiche un avertissement au premier lancement :
+
+- **Windows :** clique sur « Informations complémentaires », puis « Exécuter quand même ».
+- **macOS :** ouvre l'app une première fois. Si macOS la bloque, va dans Réglages Système > Confidentialité et sécurité, puis clique sur « Ouvrir quand même ».
+
+Sur Mac, la commande ci-dessous évite cet avertissement, puisque l'app est compilée directement sur ton Mac.
+
 ## macOS (13 ou plus récent)
 
 ```bash

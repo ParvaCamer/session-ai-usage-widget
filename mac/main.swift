@@ -121,23 +121,45 @@ struct Mascot {
     let body: NSColor
     let inner: NSColor
     let detail: NSColor
+    // Animation : les pattes alternent avec un petit rebond, et certaines cases clignotent.
+    let legsAlt: String
+    let blinkCells: [(row: Int, col: Int)]
+    let blinkInto: Character
+    let blinkPeriod: Int
+    let blinkLength: Int
 
     static let claude = Mascot(
         pixels: ["...##...", "..####..", ".######.", ".#o##o#.", ".######.", ".######.", "..####..", ".#....#."],
         body: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1),
         inner: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1),
-        detail: NSColor(srgbRed: 31 / 255, green: 30 / 255, blue: 29 / 255, alpha: 1))
+        detail: NSColor(srgbRed: 31 / 255, green: 30 / 255, blue: 29 / 255, alpha: 1),
+        legsAlt: "..#..#..",
+        blinkCells: [(row: 3, col: 2), (row: 3, col: 5)], // les yeux, environ toutes les 5 secondes
+        blinkInto: "#",
+        blinkPeriod: 40,
+        blinkLength: 2)
 
     static let codex = Mascot(
         pixels: ["########", "#xxxxxx#", "#oxxxxx#", "#xoxxxx#", "#oxxoox#", "#xxxxxx#", "########", "..#..#.."],
         body: NSColor(srgbRed: 138 / 255, green: 180 / 255, blue: 248 / 255, alpha: 1),
         inner: NSColor(srgbRed: 27 / 255, green: 39 / 255, blue: 51 / 255, alpha: 1),
-        detail: NSColor(srgbRed: 232 / 255, green: 234 / 255, blue: 237 / 255, alpha: 1))
+        detail: NSColor(srgbRed: 232 / 255, green: 234 / 255, blue: 237 / 255, alpha: 1),
+        legsAlt: ".#....#.",
+        blinkCells: [(row: 4, col: 4), (row: 4, col: 5)], // le curseur _, une fois par seconde
+        blinkInto: "x",
+        blinkPeriod: 8,
+        blinkLength: 4)
 
-    // Dessine dans un repere ou y descend (vue retournee).
-    func draw(at origin: NSPoint, pixel: CGFloat) {
-        for (row, line) in pixels.enumerated() {
-            for (col, character) in line.enumerated() {
+    // Dessine dans un repere ou y descend (vue retournee). frame avance toutes les 120 ms ; 0 donne la pose fixe.
+    func draw(at origin: NSPoint, pixel: CGFloat, frame: Int = 0) {
+        let step = (frame / 4) % 2 == 1
+        let bob: CGFloat = step ? -pixel : 0
+        let blink = frame > 0 && frame % blinkPeriod < blinkLength
+        for (row, base) in pixels.enumerated() {
+            let line = row == pixels.count - 1 && step ? legsAlt : base
+            for (col, original) in line.enumerated() {
+                var character = original
+                if blink && blinkCells.contains(where: { $0.row == row && $0.col == col }) { character = blinkInto }
                 let color: NSColor?
                 switch character {
                 case "#": color = body
@@ -147,7 +169,7 @@ struct Mascot {
                 }
                 if let color = color {
                     color.setFill()
-                    NSRect(x: origin.x + CGFloat(col) * pixel, y: origin.y + CGFloat(row) * pixel,
+                    NSRect(x: origin.x + CGFloat(col) * pixel, y: origin.y + bob + CGFloat(row) * pixel,
                            width: pixel, height: pixel).fill()
                 }
             }
@@ -290,6 +312,7 @@ final class WidgetView: NSView {
     static let sectionGap: CGFloat = 10
 
     var sections: [Section] = []
+    var animationFrame = 0
     var onClick: (() -> Void)?
     var contextMenu: NSMenu?
 
@@ -363,7 +386,7 @@ final class WidgetView: NSView {
     }
 
     private func drawSection(_ section: Section, x: CGFloat, y top: CGFloat, width: CGFloat) {
-        section.mascot.draw(at: NSPoint(x: x, y: top + 1), pixel: 2)
+        section.mascot.draw(at: NSPoint(x: x, y: top + 1), pixel: 2, frame: animationFrame)
         draw(section.name, font: .systemFont(ofSize: 12, weight: .semibold), color: Self.muted,
              in: NSRect(x: x + 22, y: top, width: width - 22, height: Self.headerHeight))
         var y = top + Self.headerHeight
@@ -489,6 +512,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         Timer.scheduledTimer(timeInterval: pollInterval, target: self, selector: #selector(refreshAll),
                              userInfo: nil, repeats: true)
         Timer.scheduledTimer(timeInterval: 30, target: self, selector: #selector(repaint),
+                             userInfo: nil, repeats: true)
+        Timer.scheduledTimer(timeInterval: 0.12, target: self, selector: #selector(animate),
                              userInfo: nil, repeats: true)
         refreshDisplay()
         refreshAll()
@@ -741,6 +766,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func repaint() {
+        widget.needsDisplay = true
+    }
+
+    // Les mascottes ne bougent que si le widget est vraiment visible a l'ecran.
+    @objc private func animate() {
+        guard panel.isVisible, panel.occlusionState.contains(.visible) else { return }
+        widget.animationFrame += 1
         widget.needsDisplay = true
     }
 

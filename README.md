@@ -36,7 +36,7 @@ Les 3 DLL doivent rester à côté du `.exe`. Si « Continuer avec Google » est
 
 ## Bon à savoir
 
-- **Source des données :** la même adresse que la page Paramètres > Utilisation de claude.ai, lue toutes les 5 minutes avec ta propre session. Elle n'est pas documentée par Anthropic et peut changer sans préavis, ce qui casserait le widget. À toi de voir si cet usage te convient au regard des conditions d'utilisation de Claude.
+- **Source des données :** la même adresse que la page Paramètres > Utilisation de claude.ai, lue toutes les 2 minutes avec ta propre session. Elle n'est pas documentée par Anthropic et peut changer sans préavis, ce qui casserait le widget. À toi de voir si cet usage te convient au regard des conditions d'utilisation de Claude.
 - **Ta connexion :** le widget ne voit pas ton mot de passe et ne contacte que claude.ai pour lire tes chiffres. La session reste sur ta machine, comme dans un navigateur :
   - Windows : `%LOCALAPPDATA%\ClaudeUsageWidget\web`
   - macOS : données WebKit de l'application

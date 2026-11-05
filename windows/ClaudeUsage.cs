@@ -246,6 +246,205 @@ namespace ClaudeUsage
         }
     }
 
+    class CodexResult
+    {
+        public List<Limit> Rows;
+        public string Error;
+    }
+
+    // Codex donne lui-meme ses limites via son app-server : il garde sa connexion, le widget ne voit aucun jeton.
+    static class CodexClient
+    {
+        const int TimeoutMs = 20000;
+
+        public static bool IsRunning()
+        {
+            System.Diagnostics.Process[] found = System.Diagnostics.Process.GetProcessesByName("codex");
+            foreach (System.Diagnostics.Process p in found) p.Dispose();
+            return found.Length > 0;
+        }
+
+        public static string FindExecutable()
+        {
+            foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName("codex"))
+            {
+                try { if (p.MainModule.FileName.EndsWith("codex.exe", StringComparison.OrdinalIgnoreCase)) return p.MainModule.FileName; }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (InvalidOperationException) { }
+                finally { p.Dispose(); }
+            }
+
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string appBin = Path.Combine(local, "OpenAI", "Codex", "bin");
+            string newest = null;
+            if (Directory.Exists(appBin))
+            {
+                foreach (string dir in Directory.GetDirectories(appBin))
+                {
+                    string candidate = Path.Combine(dir, "codex.exe");
+                    if (File.Exists(candidate)
+                        && (newest == null || File.GetLastWriteTimeUtc(candidate) > File.GetLastWriteTimeUtc(newest)))
+                        newest = candidate;
+                }
+            }
+            if (newest != null) return newest;
+
+            foreach (string dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+            {
+                try
+                {
+                    if (dir.Length > 0 && File.Exists(Path.Combine(dir, "codex.exe"))) return Path.Combine(dir, "codex.exe");
+                }
+                catch (ArgumentException) { }
+            }
+
+            string npm = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "npm", "codex.cmd");
+            return File.Exists(npm) ? npm : null;
+        }
+
+        public static CodexResult Read()
+        {
+            string exe = FindExecutable();
+            if (exe == null) return new CodexResult { Error = "Codex introuvable sur cet ordinateur" };
+
+            var info = new System.Diagnostics.ProcessStartInfo(exe, "app-server");
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true; // jamais de fenetre : rien ne doit gener un jeu
+            info.RedirectStandardInput = true;
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            info.StandardOutputEncoding = System.Text.Encoding.UTF8;
+
+            try
+            {
+                using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(info))
+                using (new System.Threading.Timer(delegate { TryKill(p); }, null, TimeoutMs, Timeout.Infinite))
+                {
+                    p.BeginErrorReadLine();
+                    Send(p, "{\"method\":\"initialize\",\"id\":1,\"params\":{\"clientInfo\":"
+                        + "{\"name\":\"claude_usage_widget\",\"title\":\"Claude Usage Widget\",\"version\":\"1.0\"}}}");
+                    if (ReadResponse(p, 1) == null) return new CodexResult { Error = "Codex ne répond pas" };
+
+                    Send(p, "{\"method\":\"initialized\"}");
+                    Send(p, "{\"method\":\"account/rateLimits/read\",\"id\":2}");
+                    Dictionary<string, object> reply = ReadResponse(p, 2);
+
+                    p.StandardInput.Close();
+                    if (!p.WaitForExit(3000)) TryKill(p);
+
+                    return Parse(reply);
+                }
+            }
+            catch (Exception ex)
+            {
+                return new CodexResult { Error = "Lecture Codex impossible : " + ex.Message };
+            }
+        }
+
+        static void Send(System.Diagnostics.Process p, string json)
+        {
+            byte[] bytes = new System.Text.UTF8Encoding(false).GetBytes(json + "\n");
+            p.StandardInput.BaseStream.Write(bytes, 0, bytes.Length);
+            p.StandardInput.BaseStream.Flush();
+        }
+
+        static Dictionary<string, object> ReadResponse(System.Diagnostics.Process p, int id)
+        {
+            string line;
+            while ((line = p.StandardOutput.ReadLine()) != null)
+            {
+                var message = UsageParser.ParseJson(line) as Dictionary<string, object>;
+                object value;
+                if (message != null && message.TryGetValue("id", out value) && value is int && (int)value == id) return message;
+            }
+            return null;
+        }
+
+        static void TryKill(System.Diagnostics.Process p)
+        {
+            try { if (!p.HasExited) p.Kill(); }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+        }
+
+        public static CodexResult Parse(Dictionary<string, object> reply)
+        {
+            if (reply == null) return new CodexResult { Error = "Codex ne répond pas" };
+            object value;
+            if (!reply.TryGetValue("result", out value) || !(value is Dictionary<string, object>))
+                return new CodexResult { Error = "Ouvre Codex et connecte-toi" };
+            return ParseResult((Dictionary<string, object>)value);
+        }
+
+        public static CodexResult ParseResult(Dictionary<string, object> result)
+        {
+            object value;
+            var limits = result.TryGetValue("rateLimits", out value) ? value as Dictionary<string, object> : null;
+            var rows = new List<Limit>();
+            if (limits != null)
+            {
+                AddWindow(rows, limits, "primary");
+                AddWindow(rows, limits, "secondary");
+            }
+            if (rows.Count == 0) return new CodexResult { Error = "Aucune limite Codex pour ce compte" };
+            return new CodexResult { Rows = rows };
+        }
+
+        static void AddWindow(List<Limit> rows, Dictionary<string, object> limits, string key)
+        {
+            object value;
+            var window = limits.TryGetValue(key, out value) ? value as Dictionary<string, object> : null;
+            if (window == null || !window.TryGetValue("usedPercent", out value) || value == null) return;
+
+            double percent;
+            try { percent = Convert.ToDouble(value, CultureInfo.InvariantCulture); }
+            catch (FormatException) { return; }
+            catch (InvalidCastException) { return; }
+            if (double.IsNaN(percent) || double.IsInfinity(percent) || percent < 0) return;
+
+            DateTime? reset = null;
+            if (window.TryGetValue("resetsAt", out value) && value != null)
+            {
+                try { reset = DateTimeOffset.FromUnixTimeSeconds(Convert.ToInt64(value, CultureInfo.InvariantCulture)).LocalDateTime; }
+                catch (FormatException) { }
+                catch (InvalidCastException) { }
+                catch (ArgumentOutOfRangeException) { }
+            }
+
+            double? minutes = null;
+            if (window.TryGetValue("windowDurationMins", out value) && value != null)
+            {
+                try { minutes = Convert.ToDouble(value, CultureInfo.InvariantCulture); }
+                catch (FormatException) { }
+                catch (InvalidCastException) { }
+            }
+
+            rows.Add(new Limit { Label = LabelForMinutes(minutes), Percent = Math.Min(percent, 100), ResetsAt = reset });
+        }
+
+        static string LabelForMinutes(double? minutes)
+        {
+            if (minutes == null) return "Limite";
+            double m = minutes.Value;
+            if (Math.Abs(m - 300) <= 30) return "Session";
+            if (Math.Abs(m - 1440) <= 144) return "Jour";
+            if (Math.Abs(m - 10080) <= 1008) return "Semaine";
+            if (Math.Abs(m - 43200) <= 4320) return "Mois";
+            return "Limite";
+        }
+    }
+
+    // Une colonne d'informations par outil suivi.
+    class Section
+    {
+        public string Name;
+        public bool Visible;
+        public List<Limit> Rows = new List<Limit>();
+        public string Message = "Chargement…";
+        public bool NeedLogin;
+        public DateTime LastOk = DateTime.MinValue;
+    }
+
     // Fenetre du navigateur : hors de l'ecran pendant les mises a jour, visible pour se connecter.
     // Sa structure ne change jamais, car recreer la fenetre casserait le controle WebView2.
     class BrowserForm : Form
@@ -290,7 +489,7 @@ namespace ClaudeUsage
 
     class WidgetForm : Form
     {
-        const int PollMinutes = 5;
+        const int PollMinutes = 2;
         const int WatchdogSeconds = 30;
         const string BaseUrl = "https://claude.ai";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -321,16 +520,17 @@ namespace ClaudeUsage
         readonly System.Windows.Forms.Timer watchdog = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer repaintTimer = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer fullscreenTimer = new System.Windows.Forms.Timer();
-        readonly bool waitForClaude;
+        readonly bool waitForApps;
         bool hiddenNow;
         readonly ToolStripMenuItem topMostItem = new ToolStripMenuItem("Toujours au premier plan");
-        readonly ToolStripMenuItem autoStartItem = new ToolStripMenuItem("Se lancer avec l'app Claude");
+        readonly ToolStripMenuItem autoStartItem = new ToolStripMenuItem("Se lancer avec l'app Claude ou Codex");
 
-        List<Limit> rows = new List<Limit>();
-        string message = "Chargement…";
-        bool needLogin;
-        DateTime lastOk = DateTime.MinValue;
-        DateTime lastPoll = DateTime.MinValue;
+        readonly Section claude = new Section { Name = "Claude" };
+        readonly Section codex = new Section { Name = "Codex" };
+        readonly ToolStripMenuItem showClaudeItem = new ToolStripMenuItem("Afficher Claude");
+        readonly ToolStripMenuItem showCodexItem = new ToolStripMenuItem("Afficher Codex");
+        bool codexBusy;
+        DateTime lastRefresh = DateTime.MinValue;
 
         BrowserForm browser;
         WebView2 web;
@@ -339,10 +539,10 @@ namespace ClaudeUsage
         string orgId;
         int lastStatus;
 
-        public WidgetForm(bool waitForClaude)
+        public WidgetForm(bool waitForApps)
         {
-            this.waitForClaude = waitForClaude;
-            if (waitForClaude) Opacity = 0; // evite un flash au demarrage de Windows, avant de savoir si Claude est ouvert
+            this.waitForApps = waitForApps;
+            if (waitForApps) Opacity = 0; // evite un flash au demarrage de Windows, avant de savoir si une app est ouverte
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
@@ -356,7 +556,7 @@ namespace ClaudeUsage
             LoadSettings();
 
             pollTimer.Interval = PollMinutes * 60 * 1000;
-            pollTimer.Tick += delegate { Poll(); };
+            pollTimer.Tick += delegate { RefreshAll(); };
             watchdog.Interval = WatchdogSeconds * 1000;
             watchdog.Tick += delegate { OnWatchdog(); };
             repaintTimer.Interval = 30 * 1000;
@@ -384,26 +584,61 @@ namespace ClaudeUsage
         const int SwHide = 0;
         const int SwShowNoActivate = 4;
 
-        // Le widget se masque si l'app Claude est fermee, ou si un plein ecran occupe SON ecran.
+        // Le widget se masque si aucune app suivie n'est ouverte, ou si un plein ecran occupe SON ecran.
         // Un jeu sur l'autre ecran ne change rien. Il revient toujours sans prendre le focus.
         void UpdateState()
         {
-            bool claudeOpen = !waitForClaude || ClaudeApp.IsRunning();
-            if (claudeOpen && browser == null) StartBrowser();
-            else if (!claudeOpen && browser != null && !browser.LoginVisible) StopBrowser();
+            bool appsOpen = !waitForApps
+                || (claude.Visible && ClaudeApp.IsRunning())
+                || (codex.Visible && CodexClient.IsRunning());
+
+            bool wantBrowser = claude.Visible && appsOpen;
+            if (wantBrowser && browser == null) StartBrowser();
+            else if (!wantBrowser && browser != null && !browser.LoginVisible) StopBrowser();
 
             Screen occupied = FullscreenApp.ScreenInUse();
             bool onOccupiedScreen = occupied != null
                 && occupied.DeviceName == Screen.FromRectangle(Bounds).DeviceName;
 
-            bool hide = !claudeOpen || onOccupiedScreen;
+            bool hide = !appsOpen || onOccupiedScreen;
             if (hide == hiddenNow) return;
             hiddenNow = hide;
             ShowWindow(Handle, hide ? SwHide : SwShowNoActivate);
-            if (!hide) Poll();
+            if (!hide) RefreshAll();
         }
 
-        // Claude ferme : on libere le moteur Edge pour que le widget en attente ne consomme presque rien.
+        void RefreshAll()
+        {
+            lastRefresh = DateTime.Now;
+            Poll();
+            PollCodex();
+        }
+
+        async void PollCodex()
+        {
+            if (!codex.Visible || hiddenNow || codexBusy) return;
+            codexBusy = true;
+            try
+            {
+                CodexResult result = await System.Threading.Tasks.Task.Run(() => CodexClient.Read());
+                if (result.Rows != null)
+                {
+                    SetCodexRows(result.Rows);
+                }
+                else
+                {
+                    Log("codex : " + result.Error);
+                    codex.Message = result.Error;
+                    UpdateShape();
+                }
+            }
+            finally
+            {
+                codexBusy = false;
+            }
+        }
+
+        // Plus aucune raison d'afficher Claude : on libere le moteur Edge, le widget ne consomme presque rien.
         void StopBrowser()
         {
             FinishPoll();
@@ -427,7 +662,8 @@ namespace ClaudeUsage
         {
             base.OnShown(e);
             UpdateState();
-            if (waitForClaude) Opacity = 1;
+            if (waitForApps) Opacity = 1;
+            PollCodex();
         }
 
         // ---------- Donnees ----------
@@ -466,7 +702,6 @@ namespace ClaudeUsage
         {
             if (!webReady || browser.LoginVisible || step != Step.None) return;
             if (hiddenNow) return; // rattrape des que le widget redevient visible
-            lastPoll = DateTime.Now;
             watchdog.Stop();
             watchdog.Start();
             if (orgId == null)
@@ -600,7 +835,7 @@ namespace ClaudeUsage
         {
             Log("delai depasse etape=" + step + " http=" + lastStatus);
             FinishPoll();
-            if (rows.Count > 0) ShowProblem("claude.ai ne répond pas");
+            if (claude.Rows.Count > 0) ShowProblem("claude.ai ne répond pas");
             else ShowLoginNeeded("Vérification requise : clique pour ouvrir claude.ai");
         }
 
@@ -670,30 +905,46 @@ namespace ClaudeUsage
 
         public void SetRows(List<Limit> newRows)
         {
-            rows = newRows;
-            message = null;
-            needLogin = false;
-            lastOk = DateTime.Now;
+            claude.Rows = newRows;
+            claude.Message = null;
+            claude.NeedLogin = false;
+            claude.LastOk = DateTime.Now;
+            UpdateShape();
+        }
+
+        public void SetCodexRows(List<Limit> newRows)
+        {
+            codex.Rows = newRows;
+            codex.Message = null;
+            codex.LastOk = DateTime.Now;
+            UpdateShape();
+        }
+
+        // Pour le mode demo : choisit les sections a dessiner.
+        public void SetVisibleSections(bool showClaude, bool showCodex)
+        {
+            claude.Visible = showClaude;
+            codex.Visible = showCodex;
             UpdateShape();
         }
 
         void ShowMessage(string text)
         {
-            message = text;
+            claude.Message = text;
             UpdateShape();
         }
 
         // Les derniers chiffres restent affiches, avec leur age, pour ne jamais les faire passer pour frais.
         void ShowProblem(string text)
         {
-            needLogin = false;
+            claude.NeedLogin = false;
             ShowMessage(text);
         }
 
         void ShowLoginNeeded(string text)
         {
-            needLogin = true;
-            rows = new List<Limit>();
+            claude.NeedLogin = true;
+            claude.Rows = new List<Limit>();
             ShowMessage(text);
         }
 
@@ -703,19 +954,35 @@ namespace ClaudeUsage
         const float RowHeight = 46f;
         const float FooterHeight = 18f;
         const float MessageHeight = 44f;
+        const float HeaderHeight = 22f;
+        const float SectionGap = 10f;
 
-        void UpdateShape()
+        float SectionHeight(Section s)
         {
-            float h = Pad * 2;
-            if (rows.Count > 0)
+            float h = HeaderHeight;
+            if (s.Rows.Count > 0)
             {
-                h += rows.Count * RowHeight - 6;
-                if (message != null) h += FooterHeight;
+                h += s.Rows.Count * RowHeight - 6;
+                if (s.Message != null) h += FooterHeight;
             }
             else
             {
                 h += MessageHeight;
             }
+            return h;
+        }
+
+        void UpdateShape()
+        {
+            float h = Pad * 2;
+            int shown = 0;
+            foreach (Section s in new[] { claude, codex })
+            {
+                if (!s.Visible) continue;
+                if (shown++ > 0) h += SectionGap;
+                h += SectionHeight(s);
+            }
+            if (shown == 0) h += MessageHeight;
             Size = new Size(S(236), S(h));
             using (GraphicsPath path = RoundedRect(new RectangleF(0, 0, Width, Height), S(10)))
             {
@@ -757,30 +1024,52 @@ namespace ClaudeUsage
             float w = Width - 2 * x;
             float y = S(Pad);
 
-            foreach (Limit row in rows)
+            int shown = 0;
+            foreach (Section s in new[] { claude, codex })
+            {
+                if (!s.Visible) continue;
+                if (shown++ > 0) y += S(SectionGap);
+                DrawSection(g, s, x, y, w);
+                y += S(SectionHeight(s));
+            }
+
+            if (shown == 0)
+            {
+                using (var b = new SolidBrush(TextMuted))
+                    DrawText(g, "Clic droit pour choisir Claude ou Codex", fontLabel, b, x, y, w, S(MessageHeight));
+            }
+        }
+
+        void DrawSection(Graphics g, Section s, float x, float y, float w)
+        {
+            using (var main = new SolidBrush(TextMuted))
+                DrawText(g, s.Name, fontValue, main, x, y, w, S(HeaderHeight));
+            y += S(HeaderHeight);
+
+            foreach (Limit row in s.Rows)
             {
                 DrawRow(g, row, x, y, w);
                 y += S(RowHeight);
             }
 
-            if (rows.Count > 0 && message != null)
+            if (s.Rows.Count > 0 && s.Message != null)
             {
                 y -= S(4);
                 using (var b = new SolidBrush(Warn))
-                    DrawText(g, Footer(), fontSmall, b, x, y, w, S(FooterHeight));
+                    DrawText(g, Footer(s), fontSmall, b, x, y, w, S(FooterHeight));
             }
-            else if (rows.Count == 0)
+            else if (s.Rows.Count == 0)
             {
-                using (var b = new SolidBrush(needLogin ? Accent : TextMuted))
-                    DrawText(g, message ?? "", fontLabel, b, x, y, w, S(MessageHeight));
+                using (var b = new SolidBrush(s.NeedLogin ? Accent : TextMuted))
+                    DrawText(g, s.Message ?? "", fontLabel, b, x, y, w, S(MessageHeight));
             }
         }
 
-        string Footer()
+        static string Footer(Section s)
         {
-            if (lastOk == DateTime.MinValue) return message;
-            int minutes = (int)(DateTime.Now - lastOk).TotalMinutes;
-            return minutes < 1 ? message : message + " · il y a " + minutes + " min";
+            if (s.LastOk == DateTime.MinValue) return s.Message;
+            int minutes = (int)(DateTime.Now - s.LastOk).TotalMinutes;
+            return minutes < 1 ? s.Message : s.Message + " · il y a " + minutes + " min";
         }
 
         void DrawRow(Graphics g, Limit row, float x, float y, float w)
@@ -834,6 +1123,8 @@ namespace ClaudeUsage
             if (left.TotalHours < 1) return "Réinitialisation dans " + (int)left.TotalMinutes + " min";
             if (left.TotalHours < 24)
                 return "Réinitialisation dans " + (int)left.TotalHours + " h " + left.Minutes.ToString("00");
+            if (left.TotalDays >= 7)
+                return "Réinitialisation le " + at.Value.ToString("d MMM", CultureInfo.GetCultureInfo("fr-FR"));
             return "Réinitialisation " + at.Value.ToString("ddd HH:mm", CultureInfo.GetCultureInfo("fr-FR"));
         }
 
@@ -855,21 +1146,27 @@ namespace ClaudeUsage
             {
                 SaveSettings();
             }
-            else if (needLogin)
+            else if (claude.Visible && claude.NeedLogin)
             {
                 OpenLogin();
             }
-            else if ((DateTime.Now - lastPoll).TotalSeconds > 10)
+            else if ((DateTime.Now - lastRefresh).TotalSeconds > 10)
             {
-                Poll();
+                RefreshAll();
             }
         }
 
         ContextMenuStrip BuildMenu()
         {
             var menu = new ContextMenuStrip();
-            menu.Items.Add("Actualiser", null, delegate { Poll(); });
-            menu.Items.Add("Se connecter / changer de compte", null, delegate { OpenLogin(); });
+            menu.Items.Add("Actualiser", null, delegate { RefreshAll(); });
+            menu.Items.Add("Claude : se connecter / changer de compte", null, delegate { OpenLogin(); });
+            menu.Items.Add(new ToolStripSeparator());
+
+            showClaudeItem.Click += delegate { ToggleSection(claude, showClaudeItem); };
+            menu.Items.Add(showClaudeItem);
+            showCodexItem.Click += delegate { ToggleSection(codex, showCodexItem); };
+            menu.Items.Add(showCodexItem);
             menu.Items.Add(new ToolStripSeparator());
 
             topMostItem.Click += delegate
@@ -887,6 +1184,16 @@ namespace ClaudeUsage
             menu.Items.Add("Quitter", null, delegate { Application.Exit(); });
             menu.Opening += delegate { autoStartItem.Checked = IsAutoStart(); };
             return menu;
+        }
+
+        void ToggleSection(Section section, ToolStripMenuItem item)
+        {
+            section.Visible = !section.Visible;
+            item.Checked = section.Visible;
+            SaveSettings();
+            UpdateShape();
+            UpdateState();
+            if (section == codex) PollCodex();
         }
 
         static bool IsAutoStart()
@@ -911,15 +1218,27 @@ namespace ClaudeUsage
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
             Point pos = new Point(wa.Right - Width - S(20), wa.Top + S(20));
             bool top = true;
+
+            // Sans reglage : on affiche ce qui est detecte, pour ne pas demander une connexion Claude a qui n'utilise que Codex.
+            bool codexFound = CodexClient.FindExecutable() != null;
+            bool claudeUsed = Directory.Exists(Path.Combine(DataDir, "web"));
+            claude.Visible = claudeUsed || !codexFound;
+            codex.Visible = codexFound;
+
             try
             {
                 if (File.Exists(SettingsPath))
                 {
                     string[] parts = File.ReadAllText(SettingsPath).Trim().Split(' ');
-                    if (parts.Length == 3)
+                    if (parts.Length >= 3)
                     {
                         Point saved = new Point(int.Parse(parts[0]), int.Parse(parts[1]));
                         top = parts[2] == "1";
+                        if (parts.Length >= 5)
+                        {
+                            claude.Visible = parts[3] == "1";
+                            codex.Visible = parts[4] == "1";
+                        }
                         // L'ecran a pu etre debranche depuis : on ne replace le widget que s'il reste visible.
                         foreach (Screen s in Screen.AllScreens)
                             if (s.WorkingArea.Contains(new Point(saved.X + S(20), saved.Y + S(20)))) pos = saved;
@@ -932,6 +1251,8 @@ namespace ClaudeUsage
             Location = pos;
             TopMost = top;
             topMostItem.Checked = top;
+            showClaudeItem.Checked = claude.Visible;
+            showCodexItem.Checked = codex.Visible;
         }
 
         void SaveSettings()
@@ -939,7 +1260,8 @@ namespace ClaudeUsage
             try
             {
                 Directory.CreateDirectory(DataDir);
-                File.WriteAllText(SettingsPath, Location.X + " " + Location.Y + " " + (TopMost ? "1" : "0"));
+                File.WriteAllText(SettingsPath, Location.X + " " + Location.Y + " " + (TopMost ? "1" : "0")
+                    + " " + (claude.Visible ? "1" : "0") + " " + (codex.Visible ? "1" : "0"));
             }
             catch (IOException) { }
         }
@@ -960,6 +1282,17 @@ namespace ClaudeUsage
             if (args.Length == 3 && args[0] == "--demo")
                 return RenderDemo(args[1], args[2]);
 
+            // Diagnostic sans fenetre : ClaudeUsage.exe --check-codex resultat.txt
+            if (args.Length == 2 && args[0] == "--check-codex")
+            {
+                CodexResult r = CodexClient.Read();
+                string text = "exe=" + (CodexClient.FindExecutable() != null) + " erreur=" + (r.Error ?? "aucune");
+                if (r.Rows != null)
+                    foreach (Limit l in r.Rows) text += " | " + l.Label + " " + l.Percent + "% reset=" + l.ResetsAt;
+                File.WriteAllText(args[1], text);
+                return 0;
+            }
+
             // Diagnostic sans fenetre : ClaudeUsage.exe --check-fullscreen resultat.txt
             if (args.Length == 2 && args[0] == "--check-fullscreen")
             {
@@ -971,9 +1304,9 @@ namespace ClaudeUsage
             using (var mutex = new Mutex(true, @"Local\ClaudeUsageWidget", out created))
             {
                 if (!created) return 0;
-                // Avec --with-claude (demarrage de Windows), le widget attend l'ouverture de l'app Claude.
-                bool waitForClaude = args.Length == 1 && args[0] == "--with-claude";
-                Application.Run(new WidgetForm(waitForClaude));
+                // Avec --with-claude (demarrage de Windows), le widget attend l'ouverture de l'app Claude ou Codex.
+                bool waitForApps = args.Length == 1 && args[0] == "--with-claude";
+                Application.Run(new WidgetForm(waitForApps));
                 GC.KeepAlive(mutex);
             }
             return 0;
@@ -981,10 +1314,15 @@ namespace ClaudeUsage
 
         static int RenderDemo(string jsonPath, string pngPath)
         {
-            object json = UsageParser.ParseJson(File.ReadAllText(jsonPath));
+            var json = UsageParser.ParseJson(File.ReadAllText(jsonPath)) as Dictionary<string, object>;
             using (var form = new WidgetForm(false))
             {
-                form.SetRows(UsageParser.Parse(json));
+                object part;
+                bool hasClaude = json.TryGetValue("claude", out part);
+                if (hasClaude) form.SetRows(UsageParser.Parse(part));
+                bool hasCodex = json.TryGetValue("codex", out part);
+                if (hasCodex) form.SetCodexRows(CodexClient.ParseResult((Dictionary<string, object>)part).Rows);
+                form.SetVisibleSections(hasClaude, hasCodex);
                 using (var bmp = new Bitmap(form.Width, form.Height))
                 using (Graphics g = Graphics.FromImage(bmp))
                 {

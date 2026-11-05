@@ -245,7 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private enum Step { case none, organizations, usage }
 
     private let baseURL = "https://claude.ai"
-    private let pollInterval: TimeInterval = 300
+    private let pollInterval: TimeInterval = 120
     private let watchdogInterval: TimeInterval = 30
 
     private var statusItem: NSStatusItem!

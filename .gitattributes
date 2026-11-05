@@ -1,0 +1,6 @@
+# Sans cela, git sous Windows peut convertir les fins de ligne et casser les scripts sur Mac.
+*.sh text eol=lf
+*.swift text eol=lf
+*.yml text eol=lf
+*.bat text eol=crlf
+*.dll binary

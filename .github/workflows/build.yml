@@ -1,0 +1,29 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vérifier le script d'installation
+        run: bash -n mac/install.sh
+      - name: Compiler
+        run: bash mac/build.sh
+      - name: Vérifier la signature locale
+        run: codesign --verify "mac/Claude Usage.app"
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compiler
+        shell: cmd
+        run: windows\build.bat

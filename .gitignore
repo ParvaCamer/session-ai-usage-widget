@@ -1,0 +1,9 @@
+# Compile localement avec build.bat ou build.sh, jamais publie
+*.exe
+*.app/
+
+# Residus de plantage de Git Bash
+*.stackdump
+
+# Reglages locaux de Claude Code
+.claude/

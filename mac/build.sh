@@ -4,7 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="Claude Usage.app"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# Icone generee par icon/make-icons.swift a partir de la mascotte.
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 # UNIVERSAL=1 : un seul binaire pour les Mac Apple Silicon et Intel (utilisé pour le dmg publié).
 if [ "${UNIVERSAL:-0}" = "1" ]; then
@@ -25,6 +27,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Claude Usage</string>
   <key>CFBundleIdentifier</key><string>local.claudeusage.widget</string>
   <key>CFBundleExecutable</key><string>ClaudeUsage</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>

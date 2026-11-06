@@ -333,6 +333,88 @@ enum Updates {
     }
 }
 
+// Mise a jour en un clic : telecharge le dmg publie, le verifie, remplace l'app en cours puis la relance.
+// En cas d'echec rien n'est modifie et la page de telechargement s'ouvre a la place.
+enum SelfUpdater {
+    static let assetName = "ClaudeUsage-macOS.dmg"
+    static let appName = "Claude Usage.app"
+
+    // A appeler hors du fil principal. Renvoie nil si la nouvelle version est installee, sinon la raison de l'echec.
+    static func install(from url: URL) -> String? {
+        let fm = FileManager.default
+        let current = Bundle.main.bundleURL
+        guard current.pathExtension == "app",
+              fm.isWritableFile(atPath: current.deletingLastPathComponent().path) else {
+            return "dossier de l'app protégé en écriture"
+        }
+        // Dossier temporaire sur le meme disque que l'app : le remplacement final est instantane.
+        guard let work = try? fm.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                     appropriateFor: current, create: true) else { return "dossier temporaire impossible" }
+        defer { try? fm.removeItem(at: work) }
+
+        let dmg = work.appendingPathComponent(assetName)
+        guard download(url, to: dmg) else { return "téléchargement impossible" }
+
+        let volume = work.appendingPathComponent("volume")
+        guard run("/usr/bin/hdiutil", ["attach", dmg.path, "-nobrowse", "-readonly", "-noautoopen",
+                                       "-mountpoint", volume.path]) else { return "dmg illisible" }
+        defer { _ = run("/usr/bin/hdiutil", ["detach", volume.path, "-force"]) }
+
+        // La signature locale ne prouve pas l'auteur, mais garantit que l'app n'est ni abimee ni incomplete.
+        let newApp = volume.appendingPathComponent(appName)
+        guard fm.fileExists(atPath: newApp.appendingPathComponent("Contents/MacOS/ClaudeUsage").path),
+              run("/usr/bin/codesign", ["--verify", "--deep", "--strict", newApp.path]) else {
+            return "app téléchargée invalide"
+        }
+
+        let staged = work.appendingPathComponent("staged.app")
+        guard run("/usr/bin/ditto", [newApp.path, staged.path]) else { return "copie impossible" }
+        do {
+            _ = try fm.replaceItemAt(current, withItemAt: staged)
+        } catch {
+            return "remplacement impossible"
+        }
+        return nil
+    }
+
+    // Attend la fin de ce processus puis rouvre l'app, desormais dans sa nouvelle version.
+    static func relaunch() {
+        let script = "while kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null; do sleep 0.2; done; "
+            + "/usr/bin/open \"$0\""
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", script, Bundle.main.bundleURL.path]
+        try? process.run()
+        NSApp.terminate(nil)
+    }
+
+    private static func download(_ url: URL, to destination: URL) -> Bool {
+        var request = URLRequest(url: url, timeoutInterval: 120)
+        request.setValue("claude-usage-widget/\(Updates.version)", forHTTPHeaderField: "User-Agent")
+        let done = DispatchSemaphore(value: 0)
+        var ok = false
+        URLSession.shared.downloadTask(with: request) { file, response, _ in
+            if let file = file, (response as? HTTPURLResponse)?.statusCode == 200 {
+                ok = (try? FileManager.default.moveItem(at: file, to: destination)) != nil
+            }
+            done.signal()
+        }.resume()
+        done.wait()
+        return ok
+    }
+
+    private static func run(_ tool: String, _ arguments: [String]) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+}
+
 // Une partie du widget par outil suivi.
 final class Section {
     let name: String
@@ -463,6 +545,7 @@ final class WidgetView: NSView {
     var animationFrame = 0
     var onClick: ((NSPoint) -> Void)?
     var updateVersion: String?
+    var updating = false // la fleche passe au gris pendant l'installation
     private(set) var updateHit = NSRect.zero
     var contextMenu: NSMenu?
 
@@ -542,8 +625,8 @@ final class WidgetView: NSView {
         let pixel: CGFloat = 2
         let width = CGFloat(Updates.arrow[0].count) * pixel
         let left = bounds.width - Self.pad - width
-        let top = Self.pad + 2 + ((animationFrame / 4) % 2 == 1 ? pixel : 0)
-        NSColor(srgbRed: 111 / 255, green: 207 / 255, blue: 151 / 255, alpha: 1).setFill()
+        let top = Self.pad + 2 + (!updating && (animationFrame / 4) % 2 == 1 ? pixel : 0)
+        (updating ? Self.muted : NSColor(srgbRed: 111 / 255, green: 207 / 255, blue: 151 / 255, alpha: 1)).setFill()
         for (row, line) in Updates.arrow.enumerated() {
             for (col, character) in line.enumerated() where character == "#" {
                 NSRect(x: left + CGFloat(col) * pixel, y: top + CGFloat(row) * pixel, width: pixel, height: pixel).fill()
@@ -638,6 +721,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private let codex = Section(name: "Codex", mascot: .codex)
     private var codexBusy = false
     private var lastRefresh = Date.distantPast
+    private var updateDownloadURL: URL?
+    private var updating = false
 
     private var web: WKWebView!
     private var browserWindow: NSWindow!
@@ -705,7 +790,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
-    // Nouvelles versions : au lancement puis toutes les 6 heures. Seul le numero de version est lu.
+    // Nouvelles versions : au lancement puis toutes les 6 heures. Seuls le numero de version et l'adresse du dmg sont lus.
     @objc private func checkForUpdate() {
         var request = URLRequest(url: Updates.apiURL, timeoutInterval: 15)
         request.setValue("claude-usage-widget/\(Updates.version)", forHTTPHeaderField: "User-Agent")
@@ -716,18 +801,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                   let tag = json["tag_name"] as? String else { return }
             let latest = tag.hasPrefix("v") || tag.hasPrefix("V") ? String(tag.dropFirst()) : tag
             guard Updates.isNewer(latest, than: Updates.version) else { return }
-            self?.performSelector(onMainThread: #selector(AppDelegate.updateFound(_:)), with: latest as NSString,
+            let assets = json["assets"] as? [[String: Any]] ?? []
+            let dmg = assets.first { $0["name"] as? String == SelfUpdater.assetName }?["browser_download_url"] as? String
+            var found: [String: String] = ["version": latest]
+            if let dmg = dmg, dmg.hasPrefix("https://github.com/") { found["url"] = dmg }
+            self?.performSelector(onMainThread: #selector(AppDelegate.updateFound(_:)), with: found as NSDictionary,
                                   waitUntilDone: false)
         }.resume()
     }
 
-    @objc private func updateFound(_ version: NSString) {
-        widget.updateVersion = version as String
+    @objc private func updateFound(_ found: NSDictionary) {
+        guard !updating else { return }
+        widget.updateVersion = found["version"] as? String
+        updateDownloadURL = (found["url"] as? String).flatMap(URL.init(string:))
         widget.needsDisplay = true
     }
 
     @objc private func openReleases() {
         NSWorkspace.shared.open(Updates.releasesURL)
+    }
+
+    // Clic sur la fleche ou sur le menu : installe la nouvelle version, ou ouvre la page si ce n'est pas possible.
+    @objc private func startUpdate() {
+        guard !updating else { return }
+        guard let url = updateDownloadURL else { return openReleases() }
+        updating = true
+        widget.updating = true
+        widget.needsDisplay = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let failure = SelfUpdater.install(from: url)
+            self?.performSelector(onMainThread: #selector(AppDelegate.updateFinished(_:)),
+                                  with: failure.map { $0 as NSString }, waitUntilDone: false)
+        }
+    }
+
+    @objc private func updateFinished(_ failure: NSString?) {
+        guard let failure = failure else { return SelfUpdater.relaunch() }
+        updating = false
+        widget.updating = false
+        widget.needsDisplay = true
+        NSLog("Mise à jour impossible : %@", failure)
+        openReleases() // repli : la page de telechargement, comme avant
     }
 
     @objc private func codexFinished(_ box: CodexResultBox) {
@@ -904,7 +1018,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     private func widgetClicked(at point: NSPoint) {
         if widget.updateVersion != nil && widget.updateHit.contains(point) {
-            openReleases()
+            startUpdate()
         } else if claude.visible && claude.loginNeeded {
             openLogin()
         } else if -lastRefresh.timeIntervalSinceNow > 10 {
@@ -1020,8 +1134,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
         menu.addItem(.separator())
 
-        if let version = widget.updateVersion {
-            add("Télécharger la mise à jour v\(version)", #selector(openReleases))
+        if updating {
+            menu.addItem(NSMenuItem(title: "Mise à jour en cours…", action: nil, keyEquivalent: ""))
+            menu.addItem(.separator())
+        } else if let version = widget.updateVersion {
+            add("Mettre à jour vers la v\(version)", #selector(startUpdate))
             menu.addItem(.separator())
         }
         add("Actualiser", #selector(refreshAll))

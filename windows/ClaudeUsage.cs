@@ -709,8 +709,10 @@ namespace ClaudeUsage
         };
 
         // Numero de la version plus recente, ou null (a jour, pas de reseau, pas encore de version publiee).
-        public static string NewerVersion()
+        // zipUrl recoit l'adresse du zip publie avec cette version, ou null s'il manque.
+        public static string NewerVersion(out string zipUrl)
         {
+            zipUrl = null;
             try
             {
                 System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
@@ -726,13 +728,142 @@ namespace ClaudeUsage
                     if (json == null || !json.TryGetValue("tag_name", out tag) || !(tag is string)) return null;
                     string latest = ((string)tag).TrimStart('v', 'V');
                     System.Version remote, local;
-                    if (System.Version.TryParse(latest, out remote) && System.Version.TryParse(Version, out local) && remote > local)
-                        return latest;
-                    return null;
+                    if (!System.Version.TryParse(latest, out remote) || !System.Version.TryParse(Version, out local) || remote <= local)
+                        return null;
+                    object assets;
+                    if (json.TryGetValue("assets", out assets) && assets is object[])
+                        foreach (object item in (object[])assets)
+                        {
+                            var asset = item as Dictionary<string, object>;
+                            object name, url;
+                            if (asset != null && asset.TryGetValue("name", out name) && (name as string) == SelfUpdater.AssetName
+                                && asset.TryGetValue("browser_download_url", out url) && url is string
+                                && ((string)url).StartsWith("https://github.com/"))
+                                zipUrl = (string)url;
+                        }
+                    return latest;
                 }
             }
             catch (System.Net.WebException) { return null; }
             catch (IOException) { return null; }
+        }
+    }
+
+    // Mise a jour en un clic : telecharge le zip publie, remplace les fichiers du widget puis le relance.
+    // Un exe en cours d'execution ne peut pas etre ecrase, mais il peut etre renomme : les anciens fichiers
+    // deviennent *.old et sont supprimes au lancement suivant. En cas d'echec, tout est remis en place.
+    static class SelfUpdater
+    {
+        public const string AssetName = "ClaudeUsage-Windows.zip";
+        public const string RestartArg = "--updated";
+
+        static string AppDir { get { return Path.GetDirectoryName(Application.ExecutablePath); } }
+
+        // A appeler hors du fil de l'interface. Renvoie null si la nouvelle version est installee, sinon la raison de l'echec.
+        public static string Install(string zipUrl)
+        {
+            string work = Path.Combine(Path.GetTempPath(), "ClaudeUsageUpdate-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(work);
+                string zip = Path.Combine(work, AssetName);
+                try
+                {
+                    System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+                    using (var client = new System.Net.WebClient())
+                    {
+                        client.Headers["User-Agent"] = "claude-usage-widget/" + Updates.Version;
+                        client.DownloadFile(zipUrl, zip);
+                    }
+                }
+                catch (System.Net.WebException) { return "téléchargement impossible"; }
+
+                string extracted = Path.Combine(work, "zip");
+                try { System.IO.Compression.ZipFile.ExtractToDirectory(zip, extracted); }
+                catch (InvalidDataException) { return "zip illisible"; }
+
+                // Le zip contient un dossier ClaudeUsage avec l'exe, les dll et les licences.
+                string source = Path.Combine(extracted, "ClaudeUsage");
+                string newExe = Path.Combine(source, "ClaudeUsage.exe");
+                if (!File.Exists(newExe)) return "zip incomplet";
+                try { System.Reflection.AssemblyName.GetAssemblyName(newExe); }
+                catch (BadImageFormatException) { return "exe téléchargé invalide"; }
+
+                return Replace(source, AppDir);
+            }
+            catch (IOException) { return "fichiers inaccessibles"; }
+            catch (UnauthorizedAccessException) { return "dossier du widget protégé en écriture"; }
+            finally
+            {
+                try { Directory.Delete(work, true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        static string Replace(string source, string appDir)
+        {
+            var renamed = new List<string>();
+            var copied = new List<string>();
+            try
+            {
+                foreach (string file in Directory.GetFiles(source))
+                {
+                    string target = Path.Combine(appDir, Path.GetFileName(file));
+                    if (File.Exists(target))
+                    {
+                        string old = target + ".old";
+                        if (File.Exists(old)) File.Delete(old);
+                        File.Move(target, old);
+                        renamed.Add(target);
+                    }
+                    File.Copy(file, target);
+                    copied.Add(target);
+                }
+                return null;
+            }
+            catch (IOException) { Rollback(renamed, copied); return "remplacement impossible"; }
+            catch (UnauthorizedAccessException) { Rollback(renamed, copied); return "dossier du widget protégé en écriture"; }
+        }
+
+        static void Rollback(List<string> renamed, List<string> copied)
+        {
+            foreach (string file in copied)
+            {
+                try { File.Delete(file); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            foreach (string file in renamed)
+            {
+                try { File.Move(file + ".old", file); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        // Lance la nouvelle version, qui attend la fermeture de celle-ci avant de demarrer.
+        public static void Restart()
+        {
+            try { System.Diagnostics.Process.Start(Application.ExecutablePath, RestartArg); }
+            catch (System.ComponentModel.Win32Exception) { return; }
+            Application.Exit();
+        }
+
+        // Au lancement : supprime les fichiers de la version precedente.
+        public static void CleanUp()
+        {
+            try
+            {
+                foreach (string file in Directory.GetFiles(AppDir, "*.old"))
+                {
+                    try { File.Delete(file); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 
@@ -829,6 +960,8 @@ namespace ClaudeUsage
         readonly System.Windows.Forms.Timer updateTimer = new System.Windows.Forms.Timer();
         readonly ToolStripMenuItem updateItem = new ToolStripMenuItem();
         string updateVersion;
+        string updateZipUrl;
+        bool updating; // la fleche passe au gris pendant l'installation
         Rectangle updateHit;
         readonly bool waitForApps;
         bool hiddenNow;
@@ -985,13 +1118,41 @@ namespace ClaudeUsage
 
         async void CheckForUpdate()
         {
-            string newer = await System.Threading.Tasks.Task.Run(() => Updates.NewerVersion());
-            if (newer == null || newer == updateVersion) return;
+            string zipUrl = null;
+            string newer = await System.Threading.Tasks.Task.Run(() => Updates.NewerVersion(out zipUrl));
+            if (newer == null || newer == updateVersion || updating) return;
             updateVersion = newer;
-            updateItem.Text = "Télécharger la mise à jour v" + newer;
+            updateZipUrl = zipUrl;
+            updateItem.Text = "Mettre à jour vers la v" + newer;
             updateItem.Visible = true;
             Log("mise a jour disponible : v" + newer);
             Invalidate();
+        }
+
+        // Clic sur la fleche ou sur le menu : installe la nouvelle version, ou ouvre la page si ce n'est pas possible.
+        async void StartUpdate()
+        {
+            if (updating) return;
+            if (updateZipUrl == null) { OpenReleasesPage(); return; }
+            updating = true;
+            updateItem.Text = "Mise à jour en cours…";
+            updateItem.Enabled = false;
+            Invalidate();
+
+            string url = updateZipUrl;
+            string failure = await System.Threading.Tasks.Task.Run(() => SelfUpdater.Install(url));
+            if (failure == null)
+            {
+                Log("mise a jour installee : v" + updateVersion);
+                SelfUpdater.Restart();
+                return;
+            }
+            Log("mise a jour impossible : " + failure);
+            updating = false;
+            updateItem.Text = "Mettre à jour vers la v" + updateVersion;
+            updateItem.Enabled = true;
+            Invalidate();
+            OpenReleasesPage(); // repli : la page de telechargement, comme avant
         }
 
         static void OpenReleasesPage()
@@ -1397,10 +1558,10 @@ namespace ClaudeUsage
             int pixel = Math.Max(2, S(2));
             int width = Updates.Arrow[0].Length * pixel;
             int left = Width - S(Pad) - width;
-            int top = S(Pad) + S(2) + ((animFrame / 4) % 2 == 1 ? pixel : 0);
+            int top = S(Pad) + S(2) + (!updating && (animFrame / 4) % 2 == 1 ? pixel : 0);
             SmoothingMode previous = g.SmoothingMode;
             g.SmoothingMode = SmoothingMode.None; // sans lissage, sinon les pixels laissent des joints
-            using (var green = new SolidBrush(Color.FromArgb(111, 207, 151)))
+            using (var green = new SolidBrush(updating ? TextMuted : Color.FromArgb(111, 207, 151)))
             {
                 for (int row = 0; row < Updates.Arrow.Length; row++)
                     for (int col = 0; col < Updates.Arrow[row].Length; col++)
@@ -1519,7 +1680,7 @@ namespace ClaudeUsage
 
             if (updateVersion != null && updateHit.Contains(e.Location))
             {
-                OpenReleasesPage();
+                StartUpdate();
                 return;
             }
 
@@ -1545,7 +1706,7 @@ namespace ClaudeUsage
         {
             var menu = new ContextMenuStrip();
             updateItem.Visible = false;
-            updateItem.Click += delegate { OpenReleasesPage(); };
+            updateItem.Click += delegate { StartUpdate(); };
             menu.Items.Add(updateItem);
             menu.Items.Add("Actualiser", null, delegate { RefreshAll(); });
             menu.Items.Add("Claude : se connecter / changer de compte", null, delegate { OpenLogin(); });
@@ -1718,7 +1879,14 @@ namespace ClaudeUsage
             bool created;
             using (var mutex = new Mutex(true, @"Local\ClaudeUsageWidget", out created))
             {
+                // Apres une mise a jour, l'ancienne version est encore en train de se fermer : on l'attend.
+                if (!created && Array.IndexOf(args, SelfUpdater.RestartArg) >= 0)
+                {
+                    try { created = mutex.WaitOne(15000); }
+                    catch (AbandonedMutexException) { created = true; }
+                }
                 if (!created) return 0;
+                SelfUpdater.CleanUp();
                 // Avec --with-claude (demarrage de Windows), le widget attend l'ouverture de l'app Claude ou Codex.
                 bool waitForApps = args.Length == 1 && args[0] == "--with-claude";
                 Application.Run(new WidgetForm(waitForApps));

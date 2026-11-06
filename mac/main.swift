@@ -317,8 +317,8 @@ struct Mascot {
 // Verifie sur GitHub si une version plus recente est publiee. Rien d'autre n'est envoye.
 enum Updates {
     static let version = "1.0.0"
-    static let releasesURL = URL(string: "https://github.com/ParvaCamer/claude-usage-widget/releases/latest")!
-    static let apiURL = URL(string: "https://api.github.com/repos/ParvaCamer/claude-usage-widget/releases/latest")!
+    static let releasesURL = URL(string: "https://github.com/ParvaCamer/session-ai-usage-widget/releases/latest")!
+    static let apiURL = URL(string: "https://api.github.com/repos/ParvaCamer/session-ai-usage-widget/releases/latest")!
     static let arrow = ["..###..", "..###..", "..###..", "#######", ".#####.", "..###..", "...#...", "#######"]
 
     static func isNewer(_ remote: String, than local: String) -> Bool {

@@ -15,7 +15,7 @@ Le menu (clic droit, ou barre de menu sur Mac) permet de cocher les outils à af
 
 ## Téléchargement direct
 
-La page [Releases](https://github.com/ParvaCamer/claude-usage-widget/releases/latest) propose des fichiers prêts à l'emploi, fabriqués automatiquement par GitHub à partir de ce code :
+La page [Releases](https://github.com/ParvaCamer/session-ai-usage-widget/releases/latest) propose des fichiers prêts à l'emploi, fabriqués automatiquement par GitHub à partir de ce code :
 
 - **Windows :** `ClaudeUsage-Windows.zip`. Décompresse-le à l'endroit où il restera, puis lance `ClaudeUsage.exe`.
 - **macOS :** `ClaudeUsage-macOS.dmg`. Ouvre-le et glisse `Claude Usage` dans `Applications`. Il fonctionne sur les Mac Apple Silicon et Intel.
@@ -30,7 +30,7 @@ Sur Mac, la commande ci-dessous évite cet avertissement, puisque l'app est comp
 ## macOS (13 ou plus récent)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ParvaCamer/claude-usage-widget/main/mac/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ParvaCamer/session-ai-usage-widget/main/mac/install.sh | bash
 ```
 
 La commande compile le widget sur ton Mac à partir de ces sources, puis l'installe dans `Applications`. Si les outils de ligne de commande Apple manquent, elle propose de les installer : relance-la ensuite. Tu peux lire [le script](mac/install.sh) avant de le lancer.

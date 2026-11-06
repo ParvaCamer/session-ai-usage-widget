@@ -693,8 +693,8 @@ namespace ClaudeUsage
     static class Updates
     {
         public const string Version = "1.0.0";
-        public const string ReleasesUrl = "https://github.com/ParvaCamer/claude-usage-widget/releases/latest";
-        const string ApiUrl = "https://api.github.com/repos/ParvaCamer/claude-usage-widget/releases/latest";
+        public const string ReleasesUrl = "https://github.com/ParvaCamer/session-ai-usage-widget/releases/latest";
+        const string ApiUrl = "https://api.github.com/repos/ParvaCamer/session-ai-usage-widget/releases/latest";
 
         public static readonly string[] Arrow =
         {

@@ -2,7 +2,7 @@
 # Installe Claude Usage sur macOS 13 ou plus : compile depuis les sources, puis copie dans Applications.
 set -euo pipefail
 
-REPO="ParvaCamer/claude-usage-widget"
+REPO="ParvaCamer/session-ai-usage-widget"
 
 if ! xcode-select -p >/dev/null 2>&1; then
   echo "Il faut d'abord les outils de ligne de commande Apple."

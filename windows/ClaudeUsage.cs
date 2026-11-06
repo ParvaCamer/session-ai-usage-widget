@@ -434,94 +434,305 @@ namespace ClaudeUsage
         }
     }
 
-    // Petite mascotte en pixel art, dessinee par le code. Ce ne sont pas les logos officiels.
-    // '#' corps, 'x' interieur, 'o' details (yeux, symboles), '.' transparent.
+    enum Mood { Normal, Panic, Sleepy }
+
+    // Une image de l'animation : la grille de pixels et son decalage (en pixels de mascotte).
+    class MascotFrame
+    {
+        public char[][] Cells;
+        public int Dx;
+        public int Dy;
+
+        public MascotFrame(string[] rows)
+        {
+            Cells = new char[rows.Length][];
+            for (int i = 0; i < rows.Length; i++) Cells[i] = rows[i].ToCharArray();
+        }
+
+        public void Row(int row, string text) { Cells[row] = text.ToCharArray(); }
+        public void Put(int row, int col, char c) { Cells[row][col] = c; }
+
+        public void Replace(char from, char to)
+        {
+            foreach (char[] line in Cells)
+                for (int i = 0; i < line.Length; i++)
+                    if (line[i] == from) line[i] = to;
+        }
+    }
+
+    // Petites mascottes en pixel art (10 x 8), dessinees par le code. Ce ne sont pas les logos officiels.
+    // '#' corps, 'x' interieur, 'o' details, 'w' texte clair, 'b' goutte, 'z' sommeil, 'r' alerte, '.' transparent.
     class Mascot
     {
-        public string[] Pixels;
+        public const int Width = 10;
+
         public Color Body;
         public Color Inner;
         public Color Detail;
+        public Func<int, Mood, MascotFrame> Animate;
 
-        // Animation : les pattes alternent avec un petit rebond, et certaines cases clignotent.
-        public string LegsAlt;
-        public Point[] BlinkCells = new Point[0]; // X = colonne, Y = ligne
-        public char BlinkInto = '#';
-        public int BlinkPeriod;
-        public int BlinkLength;
+        static readonly Color Light = Color.FromArgb(201, 209, 217);
+        static readonly Color Sweat = Color.FromArgb(127, 179, 255);
+        static readonly Color Sleep = Color.FromArgb(166, 163, 154);
+        static readonly Color Alert = Color.FromArgb(226, 88, 76);
+
+        static readonly int[] JumpHeights = { 1, -1, -2, -2, -1, 0 }; // accroupi, saut, atterrissage
 
         public static readonly Mascot Claude = new Mascot
         {
-            Pixels = new[]
-            {
-                "...##...",
-                "..####..",
-                ".######.",
-                ".#o##o#.",
-                ".######.",
-                ".######.",
-                "..####..",
-                ".#....#.",
-            },
             Body = Color.FromArgb(217, 119, 87),
             Inner = Color.FromArgb(217, 119, 87),
             Detail = Color.FromArgb(31, 30, 29),
-            LegsAlt = "..#..#..",
-            BlinkCells = new[] { new Point(2, 3), new Point(5, 3) }, // les yeux
-            BlinkInto = '#',
-            BlinkPeriod = 40, // environ toutes les 5 secondes
-            BlinkLength = 2,
+            Animate = ClaudeFrame,
         };
 
         public static readonly Mascot Codex = new Mascot
         {
-            Pixels = new[]
-            {
-                "########",
-                "#xxxxxx#",
-                "#oxxxxx#",
-                "#xoxxxx#",
-                "#oxxoox#",
-                "#xxxxxx#",
-                "########",
-                "..#..#..",
-            },
             Body = Color.FromArgb(138, 180, 248),
             Inner = Color.FromArgb(27, 39, 51),
             Detail = Color.FromArgb(232, 234, 237),
-            LegsAlt = ".#....#.",
-            BlinkCells = new[] { new Point(4, 4), new Point(5, 4) }, // le curseur _
-            BlinkInto = 'x',
-            BlinkPeriod = 8, // une fois par seconde
-            BlinkLength = 4,
+            Animate = CodexFrame,
         };
 
-        // frame avance d'un cran toutes les 120 ms ; 0 donne la pose fixe.
-        public void Draw(Graphics g, float x, float y, int pixel, int frame)
+        static readonly string[] ClaudeBase =
         {
-            bool step = (frame / 4) % 2 == 1;
-            int bob = step ? -pixel : 0;
-            bool blink = BlinkPeriod > 0 && frame % BlinkPeriod < BlinkLength && frame > 0;
+            "....##....",
+            "...####...",
+            "..######..",
+            "..#o##o#..",
+            "..######..",
+            "..######..",
+            "...####...",
+            "..#....#..",
+        };
 
+        static readonly string[] CodexBase =
+        {
+            ".########.",
+            ".#xxxxxx#.",
+            ".#oxxxxx#.",
+            ".#xoxxxx#.",
+            ".#oxxoox#.",
+            ".#xxxxxx#.",
+            ".########.",
+            "...#..#...",
+        };
+
+        static void Walk(MascotFrame f, int t, string legs)
+        {
+            if ((t / 4) % 2 == 1)
+            {
+                f.Row(7, legs);
+                f.Dy = -1;
+            }
+        }
+
+        // Petit Zzz qui monte, en boucle.
+        static void Snore(MascotFrame f, int frame, int col)
+        {
+            int z = (frame / 4) % 4;
+            if (z < 3) f.Put(2 - z, z == 0 ? col - 1 : col, 'z');
+            f.Dy = (frame / 8) % 2 == 0 ? 0 : 1; // respiration lente
+        }
+
+        // Boucle d'environ 11 secondes : marche, clignement, regards, saut, salut, sourire.
+        // Au-dela de 90 % elle panique (tremblement, goutte de sueur) ; sous 5 % elle dort.
+        static MascotFrame ClaudeFrame(int frame, Mood mood)
+        {
+            var f = new MascotFrame(ClaudeBase);
+            if (frame == 0) return f;
+
+            if (mood == Mood.Panic)
+            {
+                f.Dx = frame % 2;
+                f.Row(5, "..###o##..");
+                int drop = frame % 4;
+                if (drop < 3) f.Put(1 + drop, 8, 'b');
+                if (frame % 2 == 1) f.Row(7, "...#..#...");
+                return f;
+            }
+            if (mood == Mood.Sleepy)
+            {
+                f.Row(3, "..######..");
+                Snore(f, frame, 9);
+                return f;
+            }
+
+            int t = frame % 96;
+            if (t < 24) Walk(f, t, "...#..#...");
+            else if (t < 26) f.Row(3, "..######..");                // clignement
+            else if (t < 34) { }
+            else if (t < 40) f.Row(3, "..o##o##..");                // regarde a gauche
+            else if (t < 46) f.Row(3, "..##o##o..");                // regarde a droite
+            else if (t < 50) { }
+            else if (t < 56) f.Dy = JumpHeights[t - 50];            // saut
+            else if (t < 68)
+            {
+                bool up = ((t - 56) / 2) % 2 == 0;                  // salut de la main
+                f.Row(2, up ? "..######.#" : "..######..");
+                f.Row(3, up ? "..#o##o##." : "..#o##o###");
+            }
+            else if (t < 76) f.Row(5, "..##oo##..");                // sourire
+            else Walk(f, t, "...#..#...");
+            return f;
+        }
+
+        static void HideCursor(MascotFrame f)
+        {
+            f.Put(4, 5, 'x');
+            f.Put(4, 6, 'x');
+        }
+
+        static void ScreenOff(MascotFrame f)
+        {
+            for (int row = 1; row <= 5; row++) f.Row(row, ".#xxxxxx#.");
+        }
+
+        // Boucle d'environ 10 secondes : curseur, frappe, lignes de resultat, marche, saut, ecran qui clignote.
+        // Au-dela de 90 % l'ecran vire au rouge ; sous 5 % il se met en veille.
+        static MascotFrame CodexFrame(int frame, Mood mood)
+        {
+            var f = new MascotFrame(CodexBase);
+            if (frame == 0) return f;
+
+            if (mood == Mood.Panic)
+            {
+                f.Dx = frame % 2;
+                if (frame % 4 < 2) f.Replace('x', 'r');
+                if (frame % 2 == 1) f.Row(7, "..#....#..");
+                return f;
+            }
+            if (mood == Mood.Sleepy)
+            {
+                ScreenOff(f);
+                Snore(f, frame, 9);
+                return f;
+            }
+
+            int t = frame % 80;
+            if (t < 16)
+            {
+                if ((t / 4) % 2 == 1) HideCursor(f);
+            }
+            else if (t < 28)
+            {
+                int typed = Math.Min(3, (t - 16) / 2);                // frappe de quelques caracteres
+                for (int col = 3; col <= 7; col++) f.Put(4, col, 'x');
+                for (int i = 0; i < typed; i++) f.Put(4, 4 + i, 'w');
+                if (t < 24 || t % 4 < 2) f.Put(4, 4 + typed, 'o');
+            }
+            else if (t < 40)
+            {
+                f.Row(1, ".#wwwwxx#.");                               // lignes de resultat
+                f.Row(2, ".#xxxxxx#.");
+                f.Row(3, ".#wwwxwx#.");
+                f.Row(4, ".#xxxxxx#.");
+                f.Row(5, ".#wwxxxx#.");
+            }
+            else if (t < 56)
+            {
+                Walk(f, t, "..#....#..");
+                if ((t / 4) % 2 == 1) HideCursor(f);
+            }
+            else if (t < 62) f.Dy = JumpHeights[t - 56];
+            else if (t < 64) ScreenOff(f);
+            else if ((t / 4) % 2 == 1) HideCursor(f);
+            return f;
+        }
+
+        // frame avance d'un cran toutes les 120 ms ; 0 donne la pose fixe.
+        public void Draw(Graphics g, float x, float y, int pixel, int frame, Mood mood)
+        {
+            MascotFrame f = Animate(frame, mood);
             SmoothingMode previous = g.SmoothingMode;
             g.SmoothingMode = SmoothingMode.None;
             using (var body = new SolidBrush(Body))
             using (var inner = new SolidBrush(Inner))
             using (var detail = new SolidBrush(Detail))
+            using (var light = new SolidBrush(Light))
+            using (var sweat = new SolidBrush(Sweat))
+            using (var sleep = new SolidBrush(Sleep))
+            using (var alert = new SolidBrush(Alert))
             {
-                for (int row = 0; row < Pixels.Length; row++)
+                for (int row = 0; row < f.Cells.Length; row++)
                 {
-                    string line = row == Pixels.Length - 1 && step && LegsAlt != null ? LegsAlt : Pixels[row];
-                    for (int col = 0; col < line.Length; col++)
+                    for (int col = 0; col < f.Cells[row].Length; col++)
                     {
-                        char c = line[col];
-                        if (blink && Array.IndexOf(BlinkCells, new Point(col, row)) >= 0) c = BlinkInto;
-                        Brush b = c == '#' ? body : c == 'x' ? inner : c == 'o' ? detail : null;
-                        if (b != null) g.FillRectangle(b, (int)x + col * pixel, (int)y + bob + row * pixel, pixel, pixel);
+                        Brush b;
+                        switch (f.Cells[row][col])
+                        {
+                            case '#': b = body; break;
+                            case 'x': b = inner; break;
+                            case 'o': b = detail; break;
+                            case 'w': b = light; break;
+                            case 'b': b = sweat; break;
+                            case 'z': b = sleep; break;
+                            case 'r': b = alert; break;
+                            default: b = null; break;
+                        }
+                        if (b != null)
+                            g.FillRectangle(b, (int)x + (col + f.Dx) * pixel, (int)y + (row + f.Dy) * pixel, pixel, pixel);
                     }
                 }
             }
             g.SmoothingMode = previous;
+        }
+
+        public static Mood MoodOf(List<Limit> rows)
+        {
+            if (rows.Count == 0) return Mood.Normal;
+            double max = 0;
+            foreach (Limit l in rows) max = Math.Max(max, l.Percent);
+            if (max >= 90) return Mood.Panic;
+            if (max <= 5) return Mood.Sleepy;
+            return Mood.Normal;
+        }
+    }
+
+    // Verifie sur GitHub si une version plus recente est publiee. Rien d'autre n'est envoye.
+    static class Updates
+    {
+        public const string Version = "1.0.0";
+        public const string ReleasesUrl = "https://github.com/ParvaCamer/claude-usage-widget/releases/latest";
+        const string ApiUrl = "https://api.github.com/repos/ParvaCamer/claude-usage-widget/releases/latest";
+
+        public static readonly string[] Arrow =
+        {
+            "..###..",
+            "..###..",
+            "..###..",
+            "#######",
+            ".#####.",
+            "..###..",
+            "...#...",
+            "#######",
+        };
+
+        // Numero de la version plus recente, ou null (a jour, pas de reseau, pas encore de version publiee).
+        public static string NewerVersion()
+        {
+            try
+            {
+                System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+                var request = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(ApiUrl);
+                request.UserAgent = "claude-usage-widget/" + Version;
+                request.Accept = "application/vnd.github+json";
+                request.Timeout = 15000;
+                using (var response = request.GetResponse())
+                using (var reader = new StreamReader(response.GetResponseStream()))
+                {
+                    var json = UsageParser.ParseJson(reader.ReadToEnd()) as Dictionary<string, object>;
+                    object tag;
+                    if (json == null || !json.TryGetValue("tag_name", out tag) || !(tag is string)) return null;
+                    string latest = ((string)tag).TrimStart('v', 'V');
+                    System.Version remote, local;
+                    if (System.Version.TryParse(latest, out remote) && System.Version.TryParse(Version, out local) && remote > local)
+                        return latest;
+                    return null;
+                }
+            }
+            catch (System.Net.WebException) { return null; }
+            catch (IOException) { return null; }
         }
     }
 
@@ -615,6 +826,10 @@ namespace ClaudeUsage
         readonly System.Windows.Forms.Timer animTimer = new System.Windows.Forms.Timer();
         readonly List<Rectangle> mascotAreas = new List<Rectangle>();
         int animFrame;
+        readonly System.Windows.Forms.Timer updateTimer = new System.Windows.Forms.Timer();
+        readonly ToolStripMenuItem updateItem = new ToolStripMenuItem();
+        string updateVersion;
+        Rectangle updateHit;
         readonly bool waitForApps;
         bool hiddenNow;
         readonly ToolStripMenuItem topMostItem = new ToolStripMenuItem("Toujours au premier plan");
@@ -658,6 +873,9 @@ namespace ClaudeUsage
             repaintTimer.Tick += delegate { Invalidate(); };
             fullscreenTimer.Interval = 3000;
             fullscreenTimer.Tick += delegate { UpdateState(); };
+
+            updateTimer.Interval = 6 * 60 * 60 * 1000; // nouvelles versions : toutes les 6 heures
+            updateTimer.Tick += delegate { CheckForUpdate(); };
 
             // Seules les mascottes sont redessinees, et rien du tout quand le widget est masque.
             animTimer.Interval = 120;
@@ -761,6 +979,25 @@ namespace ClaudeUsage
             repaintTimer.Start();
             fullscreenTimer.Start();
             animTimer.Start();
+            updateTimer.Start();
+            CheckForUpdate();
+        }
+
+        async void CheckForUpdate()
+        {
+            string newer = await System.Threading.Tasks.Task.Run(() => Updates.NewerVersion());
+            if (newer == null || newer == updateVersion) return;
+            updateVersion = newer;
+            updateItem.Text = "Télécharger la mise à jour v" + newer;
+            updateItem.Visible = true;
+            Log("mise a jour disponible : v" + newer);
+            Invalidate();
+        }
+
+        static void OpenReleasesPage()
+        {
+            try { System.Diagnostics.Process.Start(Updates.ReleasesUrl); }
+            catch (System.ComponentModel.Win32Exception) { }
         }
 
         protected override void OnShown(EventArgs e)
@@ -1025,6 +1262,12 @@ namespace ClaudeUsage
             UpdateShape();
         }
 
+        // Pour le mode demo : affiche la fleche comme si une version plus recente existait.
+        public void SetUpdateForDemo(string version)
+        {
+            updateVersion = version;
+        }
+
         // Pour le mode demo : choisit les sections a dessiner.
         public void SetVisibleSections(bool showClaude, bool showCodex)
         {
@@ -1144,16 +1387,42 @@ namespace ClaudeUsage
                 using (var b = new SolidBrush(TextMuted))
                     DrawText(g, "Clic droit pour choisir Claude ou Codex", fontLabel, b, x, y, w, S(MessageHeight));
             }
+
+            if (updateVersion != null) DrawUpdateArrow(g);
+        }
+
+        // Fleche de telechargement en haut a droite, qui rebondit doucement. Un clic ouvre la page des versions.
+        void DrawUpdateArrow(Graphics g)
+        {
+            int pixel = Math.Max(2, S(2));
+            int width = Updates.Arrow[0].Length * pixel;
+            int left = Width - S(Pad) - width;
+            int top = S(Pad) + S(2) + ((animFrame / 4) % 2 == 1 ? pixel : 0);
+            SmoothingMode previous = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.None; // sans lissage, sinon les pixels laissent des joints
+            using (var green = new SolidBrush(Color.FromArgb(111, 207, 151)))
+            {
+                for (int row = 0; row < Updates.Arrow.Length; row++)
+                    for (int col = 0; col < Updates.Arrow[row].Length; col++)
+                        if (Updates.Arrow[row][col] == '#')
+                            g.FillRectangle(green, left + col * pixel, top + row * pixel, pixel, pixel);
+            }
+            g.SmoothingMode = previous;
+            int pad = Math.Max(S(5), (S(24) - width) / 2);
+            updateHit = new Rectangle(left - pad, S(Pad) - pad, width + 2 * pad, 9 * pixel + 2 * pad);
+            mascotAreas.Add(new Rectangle(left - 1, S(Pad), width + 2, 10 * pixel + 2));
         }
 
         void DrawSection(Graphics g, Section s, float x, float y, float w)
         {
             int pixel = Math.Max(2, S(2));
             float mascotY = y + (S(HeaderHeight) - 8 * pixel) / 2f - S(2);
-            s.Mascot.Draw(g, x, mascotY, pixel, animFrame);
-            mascotAreas.Add(new Rectangle((int)x - 1, (int)mascotY - pixel - 1, 8 * pixel + 2, 9 * pixel + 2));
+            s.Mascot.Draw(g, x, mascotY, pixel, animFrame, Mascot.MoodOf(s.Rows));
+            // Zone a redessiner a chaque image : la mascotte, son saut et son tremblement.
+            mascotAreas.Add(new Rectangle((int)x - pixel - 1, (int)mascotY - 3 * pixel - 1,
+                (Mascot.Width + 2) * pixel + 2, 12 * pixel + 2));
             using (var main = new SolidBrush(TextMuted))
-                DrawText(g, s.Name, fontValue, main, x + 8 * pixel + S(6), y, w, S(HeaderHeight));
+                DrawText(g, s.Name, fontValue, main, x + Mascot.Width * pixel + S(4), y, w, S(HeaderHeight));
             y += S(HeaderHeight);
 
             foreach (Limit row in s.Rows)
@@ -1248,6 +1517,12 @@ namespace ClaudeUsage
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
 
+            if (updateVersion != null && updateHit.Contains(e.Location))
+            {
+                OpenReleasesPage();
+                return;
+            }
+
             Point before = Location;
             ReleaseCapture();
             SendMessage(Handle, 0xA1 /* WM_NCLBUTTONDOWN */, (IntPtr)2 /* HTCAPTION */, IntPtr.Zero);
@@ -1269,6 +1544,9 @@ namespace ClaudeUsage
         ContextMenuStrip BuildMenu()
         {
             var menu = new ContextMenuStrip();
+            updateItem.Visible = false;
+            updateItem.Click += delegate { OpenReleasesPage(); };
+            menu.Items.Add(updateItem);
             menu.Items.Add("Actualiser", null, delegate { RefreshAll(); });
             menu.Items.Add("Claude : se connecter / changer de compte", null, delegate { OpenLogin(); });
             menu.Items.Add(new ToolStripSeparator());
@@ -1395,15 +1673,24 @@ namespace ClaudeUsage
             // Planche des poses animees, pour verifier l'animation sans fenetre.
             if (args.Length == 2 && args[0] == "--demo-frames")
             {
-                int[] frames = { 0, 4, 40, 41, 2, 6 };
-                using (var bmp = new Bitmap(frames.Length * 26 + 4, 2 * 26 + 4))
+                // Ligne 1-2 : scenes normales. Ligne 3-4 : panique (2 poses) puis sommeil (2 poses).
+                int[] claudeFrames = { 0, 5, 24, 36, 42, 52, 58, 60, 72 };
+                int[] codexFrames = { 0, 6, 20, 26, 30, 45, 58, 62, 70 };
+                int[] moodFrames = { 1, 2, 4, 8 };
+                using (var bmp = new Bitmap(9 * 28 + 6, 4 * 28 + 6))
                 using (Graphics g = Graphics.FromImage(bmp))
                 {
                     g.Clear(Color.FromArgb(31, 30, 29));
-                    for (int i = 0; i < frames.Length; i++)
+                    for (int i = 0; i < 9; i++)
                     {
-                        Mascot.Claude.Draw(g, 4 + i * 26, 6, 2, frames[i]);
-                        Mascot.Codex.Draw(g, 4 + i * 26, 32, 2, frames[i]);
+                        Mascot.Claude.Draw(g, 6 + i * 28, 10, 2, claudeFrames[i], Mood.Normal);
+                        Mascot.Codex.Draw(g, 6 + i * 28, 38, 2, codexFrames[i], Mood.Normal);
+                    }
+                    for (int i = 0; i < 4; i++)
+                    {
+                        Mood mood = i < 2 ? Mood.Panic : Mood.Sleepy;
+                        Mascot.Claude.Draw(g, 6 + i * 28, 66, 2, moodFrames[i], mood);
+                        Mascot.Codex.Draw(g, 6 + i * 28, 94, 2, moodFrames[i], mood);
                     }
                     bmp.Save(args[1], ImageFormat.Png);
                 }
@@ -1451,6 +1738,7 @@ namespace ClaudeUsage
                 bool hasCodex = json.TryGetValue("codex", out part);
                 if (hasCodex) form.SetCodexRows(CodexClient.ParseResult((Dictionary<string, object>)part).Rows);
                 form.SetVisibleSections(hasClaude, hasCodex);
+                if (json.TryGetValue("update", out part) && part is string) form.SetUpdateForDemo((string)part);
                 using (var bmp = new Bitmap(form.Width, form.Height))
                 using (Graphics g = Graphics.FromImage(bmp))
                 {

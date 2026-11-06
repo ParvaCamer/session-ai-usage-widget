@@ -623,7 +623,8 @@ final class WidgetView: NSView {
 
 // ---------- Application ----------
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSWindowDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate,
+                         NSMenuDelegate {
     private enum Step { case none, organizations, usage }
 
     private let baseURL = "https://claude.ai"
@@ -641,6 +642,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     private var web: WKWebView!
     private var browserWindow: NSWindow!
+    private var popupWindows: [NSWindow] = []
+
+    // Google refuse les navigateurs integres : on se presente comme Safari, avec la version installee.
+    private static let safariUserAgent: String = {
+        let safari = Bundle(path: "/Applications/Safari.app")
+        let version = safari?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "18.0"
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            + "(KHTML, like Gecko) Version/\(version) Safari/605.1.15"
+    }()
     private var loginVisible = false
     private var step = Step.none
     private var orgId: String?
@@ -778,8 +788,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func buildBrowser() {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         web = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 720), configuration: configuration)
         web.navigationDelegate = self
+        web.uiDelegate = self
+        web.customUserAgent = Self.safariUserAgent
 
         browserWindow = NSWindow(contentRect: web.frame, styleMask: [.titled, .closable, .resizable],
                                  backing: .buffered, defer: false)
@@ -938,14 +951,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         loginVisible = false
         loginTimer?.invalidate()
         loginTimer = nil
+        popupWindows.forEach { $0.orderOut(nil) }
+        popupWindows.removeAll()
         browserWindow.orderOut(nil)
     }
 
     // Le navigateur sert aussi aux mises a jour : fermer la fenetre ne fait que la masquer.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender !== browserWindow {
+            popupWindows.removeAll { $0 === sender }
+            return true
+        }
         closeLogin()
         pollNow()
         return false
+    }
+
+    // "Continuer avec Google" ouvre une fenetre popup : sans elle, claude.ai affiche une erreur de connexion.
+    // La configuration recue doit etre reutilisee telle quelle pour garder le lien avec la page de claude.ai.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        let width = windowFeatures.width?.doubleValue ?? 500
+        let height = windowFeatures.height?.doubleValue ?? 640
+        let popup = WKWebView(frame: NSRect(x: 0, y: 0, width: width, height: height), configuration: configuration)
+        popup.uiDelegate = self
+        popup.customUserAgent = Self.safariUserAgent
+
+        let window = NSWindow(contentRect: popup.frame, styleMask: [.titled, .closable, .resizable],
+                              backing: .buffered, defer: false)
+        window.title = "Connexion"
+        window.contentView = popup
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        popupWindows.append(window)
+        return popup
+    }
+
+    // La popup Google se ferme d'elle-meme (window.close) une fois la connexion terminee.
+    func webViewDidClose(_ webView: WKWebView) {
+        guard let window = popupWindows.first(where: { $0.contentView === webView }) else { return }
+        popupWindows.removeAll { $0 === window }
+        window.orderOut(nil)
     }
 
     // ---------- Affichage ----------

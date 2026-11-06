@@ -9,7 +9,20 @@ permissions:
   contents: read
 
 jobs:
+  # Le widget compare son numéro de version à celui du dernier tag : ils doivent correspondre,
+  # sinon la flèche « mise à jour disponible » ne disparaîtrait jamais.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vérifier que le tag correspond à la version du code
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          grep -q "Version = \"$TAG\"" windows/ClaudeUsage.cs || { echo "Mettre Updates.Version = \"$TAG\" dans windows/ClaudeUsage.cs"; exit 1; }
+          grep -q "version = \"$TAG\"" mac/main.swift || { echo "Mettre Updates.version = \"$TAG\" dans mac/main.swift"; exit 1; }
+
   windows:
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

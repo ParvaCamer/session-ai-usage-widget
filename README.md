@@ -4,6 +4,8 @@ Affiche en permanence le pourcentage utilisé de tes forfaits **Claude** et **Co
 
 Projet personnel non officiel, sans lien avec Anthropic ni OpenAI. Les petites mascottes en pixel art sont des créations originales, pas les logos officiels.
 
+Les mascottes s'animent en continu : marche, regards, saut et salut pour Claude ; frappe au clavier et lignes de résultat pour Codex. Elles réagissent à ta consommation : panique au-delà de 90 %, sommeil sous 5 %. Quand une nouvelle version est publiée, une petite flèche verte apparaît en haut à droite du widget : un clic ouvre la page de téléchargement.
+
 ## Quels outils ?
 
 - **Claude :** connecte-toi une fois à claude.ai en cliquant sur le widget.

@@ -28,6 +28,7 @@ jobs:
           path: ClaudeUsage-Windows.zip
 
   mac:
+    needs: version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

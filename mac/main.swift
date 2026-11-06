@@ -114,62 +114,191 @@ func resetText(_ date: Date?) -> String {
 
 func percentText(_ value: Double) -> String { "\(Int(value.rounded())) %" }
 
-// Petite mascotte en pixel art, dessinee par le code. Ce ne sont pas les logos officiels.
-// '#' corps, 'x' interieur, 'o' details (yeux, symboles), '.' transparent.
+enum Mood { case normal, panic, sleepy }
+
+// Une image de l'animation : la grille de pixels et son decalage (en pixels de mascotte).
+struct MascotFrame {
+    var cells: [[Character]]
+    var dx = 0
+    var dy = 0
+
+    init(_ rows: [String]) { cells = rows.map { Array($0) } }
+    mutating func row(_ index: Int, _ text: String) { cells[index] = Array(text) }
+    mutating func put(_ row: Int, _ col: Int, _ character: Character) { cells[row][col] = character }
+    mutating func replace(_ from: Character, with to: Character) {
+        cells = cells.map { line in line.map { $0 == from ? to : $0 } }
+    }
+}
+
+// Petites mascottes en pixel art (10 x 8), dessinees par le code. Ce ne sont pas les logos officiels.
+// '#' corps, 'x' interieur, 'o' details, 'w' texte clair, 'b' goutte, 'z' sommeil, 'r' alerte, '.' transparent.
 struct Mascot {
-    let pixels: [String]
+    static let width = 10
+
     let body: NSColor
     let inner: NSColor
     let detail: NSColor
-    // Animation : les pattes alternent avec un petit rebond, et certaines cases clignotent.
-    let legsAlt: String
-    let blinkCells: [(row: Int, col: Int)]
-    let blinkInto: Character
-    let blinkPeriod: Int
-    let blinkLength: Int
+    let animate: (Int, Mood) -> MascotFrame
+
+    static let light = NSColor(srgbRed: 201 / 255, green: 209 / 255, blue: 217 / 255, alpha: 1)
+    static let sweat = NSColor(srgbRed: 127 / 255, green: 179 / 255, blue: 255 / 255, alpha: 1)
+    static let sleep = NSColor(srgbRed: 166 / 255, green: 163 / 255, blue: 154 / 255, alpha: 1)
+    static let alert = NSColor(srgbRed: 226 / 255, green: 88 / 255, blue: 76 / 255, alpha: 1)
+    static let jumpHeights = [1, -1, -2, -2, -1, 0] // accroupi, saut, atterrissage
 
     static let claude = Mascot(
-        pixels: ["...##...", "..####..", ".######.", ".#o##o#.", ".######.", ".######.", "..####..", ".#....#."],
         body: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1),
         inner: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1),
         detail: NSColor(srgbRed: 31 / 255, green: 30 / 255, blue: 29 / 255, alpha: 1),
-        legsAlt: "..#..#..",
-        blinkCells: [(row: 3, col: 2), (row: 3, col: 5)], // les yeux, environ toutes les 5 secondes
-        blinkInto: "#",
-        blinkPeriod: 40,
-        blinkLength: 2)
+        animate: Mascot.claudeFrame)
 
     static let codex = Mascot(
-        pixels: ["########", "#xxxxxx#", "#oxxxxx#", "#xoxxxx#", "#oxxoox#", "#xxxxxx#", "########", "..#..#.."],
         body: NSColor(srgbRed: 138 / 255, green: 180 / 255, blue: 248 / 255, alpha: 1),
         inner: NSColor(srgbRed: 27 / 255, green: 39 / 255, blue: 51 / 255, alpha: 1),
         detail: NSColor(srgbRed: 232 / 255, green: 234 / 255, blue: 237 / 255, alpha: 1),
-        legsAlt: ".#....#.",
-        blinkCells: [(row: 4, col: 4), (row: 4, col: 5)], // le curseur _, une fois par seconde
-        blinkInto: "x",
-        blinkPeriod: 8,
-        blinkLength: 4)
+        animate: Mascot.codexFrame)
+
+    static let claudeBase = ["....##....", "...####...", "..######..", "..#o##o#..",
+                             "..######..", "..######..", "...####...", "..#....#.."]
+    static let codexBase = [".########.", ".#xxxxxx#.", ".#oxxxxx#.", ".#xoxxxx#.",
+                            ".#oxxoox#.", ".#xxxxxx#.", ".########.", "...#..#..."]
+
+    static func walk(_ f: inout MascotFrame, _ t: Int, legs: String) {
+        if (t / 4) % 2 == 1 {
+            f.row(7, legs)
+            f.dy = -1
+        }
+    }
+
+    // Petit Zzz qui monte, en boucle.
+    static func snore(_ f: inout MascotFrame, _ frame: Int, col: Int) {
+        let z = (frame / 4) % 4
+        if z < 3 { f.put(2 - z, z == 0 ? col - 1 : col, "z") }
+        f.dy = (frame / 8) % 2 == 0 ? 0 : 1 // respiration lente
+    }
+
+    // Boucle d'environ 11 secondes : marche, clignement, regards, saut, salut, sourire.
+    // Au-dela de 90 % elle panique (tremblement, goutte de sueur) ; sous 5 % elle dort.
+    static func claudeFrame(_ frame: Int, _ mood: Mood) -> MascotFrame {
+        var f = MascotFrame(claudeBase)
+        if frame == 0 { return f }
+
+        switch mood {
+        case .panic:
+            f.dx = frame % 2
+            f.row(5, "..###o##..")
+            let drop = frame % 4
+            if drop < 3 { f.put(1 + drop, 8, "b") }
+            if frame % 2 == 1 { f.row(7, "...#..#...") }
+            return f
+        case .sleepy:
+            f.row(3, "..######..")
+            snore(&f, frame, col: 9)
+            return f
+        case .normal:
+            break
+        }
+
+        let t = frame % 96
+        if t < 24 { walk(&f, t, legs: "...#..#...") }
+        else if t < 26 { f.row(3, "..######..") }                  // clignement
+        else if t < 34 { }
+        else if t < 40 { f.row(3, "..o##o##..") }                  // regarde a gauche
+        else if t < 46 { f.row(3, "..##o##o..") }                  // regarde a droite
+        else if t < 50 { }
+        else if t < 56 { f.dy = jumpHeights[t - 50] }              // saut
+        else if t < 68 {
+            let up = ((t - 56) / 2) % 2 == 0                         // salut de la main
+            f.row(2, up ? "..######.#" : "..######..")
+            f.row(3, up ? "..#o##o##." : "..#o##o###")
+        }
+        else if t < 76 { f.row(5, "..##oo##..") }                  // sourire
+        else { walk(&f, t, legs: "...#..#...") }
+        return f
+    }
+
+    static func hideCursor(_ f: inout MascotFrame) {
+        f.put(4, 5, "x")
+        f.put(4, 6, "x")
+    }
+
+    static func screenOff(_ f: inout MascotFrame) {
+        for row in 1...5 { f.row(row, ".#xxxxxx#.") }
+    }
+
+    // Boucle d'environ 10 secondes : curseur, frappe, lignes de resultat, marche, saut, ecran qui clignote.
+    // Au-dela de 90 % l'ecran vire au rouge ; sous 5 % il se met en veille.
+    static func codexFrame(_ frame: Int, _ mood: Mood) -> MascotFrame {
+        var f = MascotFrame(codexBase)
+        if frame == 0 { return f }
+
+        switch mood {
+        case .panic:
+            f.dx = frame % 2
+            if frame % 4 < 2 { f.replace("x", with: "r") }
+            if frame % 2 == 1 { f.row(7, "..#....#..") }
+            return f
+        case .sleepy:
+            screenOff(&f)
+            snore(&f, frame, col: 9)
+            return f
+        case .normal:
+            break
+        }
+
+        let t = frame % 80
+        if t < 16 {
+            if (t / 4) % 2 == 1 { hideCursor(&f) }
+        } else if t < 28 {
+            let typed = min(3, (t - 16) / 2)                        // frappe de quelques caracteres
+            for col in 3...7 { f.put(4, col, "x") }
+            for i in 0..<typed { f.put(4, 4 + i, "w") }
+            if t < 24 || t % 4 < 2 { f.put(4, 4 + typed, "o") }
+        } else if t < 40 {
+            f.row(1, ".#wwwwxx#.")                                  // lignes de resultat
+            f.row(2, ".#xxxxxx#.")
+            f.row(3, ".#wwwxwx#.")
+            f.row(4, ".#xxxxxx#.")
+            f.row(5, ".#wwxxxx#.")
+        } else if t < 56 {
+            walk(&f, t, legs: "..#....#..")
+            if (t / 4) % 2 == 1 { hideCursor(&f) }
+        } else if t < 62 {
+            f.dy = jumpHeights[t - 56]
+        } else if t < 64 {
+            screenOff(&f)
+        } else if (t / 4) % 2 == 1 {
+            hideCursor(&f)
+        }
+        return f
+    }
+
+    static func mood(of limits: [Limit]) -> Mood {
+        guard let highest = limits.map({ $0.percent }).max() else { return .normal }
+        if highest >= 90 { return .panic }
+        if highest <= 5 { return .sleepy }
+        return .normal
+    }
 
     // Dessine dans un repere ou y descend (vue retournee). frame avance toutes les 120 ms ; 0 donne la pose fixe.
-    func draw(at origin: NSPoint, pixel: CGFloat, frame: Int = 0) {
-        let step = (frame / 4) % 2 == 1
-        let bob: CGFloat = step ? -pixel : 0
-        let blink = frame > 0 && frame % blinkPeriod < blinkLength
-        for (row, base) in pixels.enumerated() {
-            let line = row == pixels.count - 1 && step ? legsAlt : base
-            for (col, original) in line.enumerated() {
-                var character = original
-                if blink && blinkCells.contains(where: { $0.row == row && $0.col == col }) { character = blinkInto }
+    func draw(at origin: NSPoint, pixel: CGFloat, frame: Int = 0, mood: Mood = .normal) {
+        let f = animate(frame, mood)
+        for (row, line) in f.cells.enumerated() {
+            for (col, character) in line.enumerated() {
                 let color: NSColor?
                 switch character {
                 case "#": color = body
                 case "x": color = inner
                 case "o": color = detail
+                case "w": color = Mascot.light
+                case "b": color = Mascot.sweat
+                case "z": color = Mascot.sleep
+                case "r": color = Mascot.alert
                 default: color = nil
                 }
                 if let color = color {
                     color.setFill()
-                    NSRect(x: origin.x + CGFloat(col) * pixel, y: origin.y + bob + CGFloat(row) * pixel,
+                    NSRect(x: origin.x + CGFloat(col + f.dx) * pixel, y: origin.y + CGFloat(row + f.dy) * pixel,
                            width: pixel, height: pixel).fill()
                 }
             }
@@ -178,10 +307,29 @@ struct Mascot {
 
     func image(pixel: CGFloat) -> NSImage {
         let mascot = self
-        return NSImage(size: NSSize(width: 8 * pixel, height: 8 * pixel), flipped: true) { _ in
+        return NSImage(size: NSSize(width: CGFloat(Mascot.width) * pixel, height: 8 * pixel), flipped: true) { _ in
             mascot.draw(at: .zero, pixel: pixel)
             return true
         }
+    }
+}
+
+// Verifie sur GitHub si une version plus recente est publiee. Rien d'autre n'est envoye.
+enum Updates {
+    static let version = "1.0.0"
+    static let releasesURL = URL(string: "https://github.com/ParvaCamer/claude-usage-widget/releases/latest")!
+    static let apiURL = URL(string: "https://api.github.com/repos/ParvaCamer/claude-usage-widget/releases/latest")!
+    static let arrow = ["..###..", "..###..", "..###..", "#######", ".#####.", "..###..", "...#...", "#######"]
+
+    static func isNewer(_ remote: String, than local: String) -> Bool {
+        let r = remote.split(separator: ".").map { Int($0) ?? 0 }
+        let l = local.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(r.count, l.count) {
+            let a = i < r.count ? r[i] : 0
+            let b = i < l.count ? l[i] : 0
+            if a != b { return a > b }
+        }
+        return false
     }
 }
 
@@ -313,7 +461,9 @@ final class WidgetView: NSView {
 
     var sections: [Section] = []
     var animationFrame = 0
-    var onClick: (() -> Void)?
+    var onClick: ((NSPoint) -> Void)?
+    var updateVersion: String?
+    private(set) var updateHit = NSRect.zero
     var contextMenu: NSMenu?
 
     private var dragStartMouse = NSPoint.zero
@@ -358,7 +508,7 @@ final class WidgetView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if !dragged { onClick?() }
+        if !dragged { onClick?(convert(event.locationInWindow, from: nil)) }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -383,12 +533,30 @@ final class WidgetView: NSView {
             drawSection(section, x: x, y: y, width: width)
             y += Self.height(of: section)
         }
+
+        if updateVersion != nil { drawUpdateArrow() }
+    }
+
+    // Fleche de telechargement en haut a droite, qui rebondit doucement. Un clic ouvre la page des versions.
+    private func drawUpdateArrow() {
+        let pixel: CGFloat = 2
+        let width = CGFloat(Updates.arrow[0].count) * pixel
+        let left = bounds.width - Self.pad - width
+        let top = Self.pad + 2 + ((animationFrame / 4) % 2 == 1 ? pixel : 0)
+        NSColor(srgbRed: 111 / 255, green: 207 / 255, blue: 151 / 255, alpha: 1).setFill()
+        for (row, line) in Updates.arrow.enumerated() {
+            for (col, character) in line.enumerated() where character == "#" {
+                NSRect(x: left + CGFloat(col) * pixel, y: top + CGFloat(row) * pixel, width: pixel, height: pixel).fill()
+            }
+        }
+        updateHit = NSRect(x: left - 6, y: Self.pad - 6, width: width + 12, height: 9 * pixel + 12)
     }
 
     private func drawSection(_ section: Section, x: CGFloat, y top: CGFloat, width: CGFloat) {
-        section.mascot.draw(at: NSPoint(x: x, y: top + 1), pixel: 2, frame: animationFrame)
+        section.mascot.draw(at: NSPoint(x: x, y: top + 1), pixel: 2, frame: animationFrame,
+                            mood: Mascot.mood(of: section.limits))
         draw(section.name, font: .systemFont(ofSize: 12, weight: .semibold), color: Self.muted,
-             in: NSRect(x: x + 22, y: top, width: width - 22, height: Self.headerHeight))
+             in: NSRect(x: x + 24, y: top, width: width - 24, height: Self.headerHeight))
         var y = top + Self.headerHeight
 
         for limit in section.limits {
@@ -515,6 +683,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                              userInfo: nil, repeats: true)
         Timer.scheduledTimer(timeInterval: 0.12, target: self, selector: #selector(animate),
                              userInfo: nil, repeats: true)
+        Timer.scheduledTimer(timeInterval: 6 * 3600, target: self, selector: #selector(checkForUpdate),
+                             userInfo: nil, repeats: true)
+        checkForUpdate()
         refreshDisplay()
         refreshAll()
     }
@@ -532,6 +703,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             let box = CodexResultBox(CodexClient.read())
             self?.performSelector(onMainThread: #selector(AppDelegate.codexFinished(_:)), with: box, waitUntilDone: false)
         }
+    }
+
+    // Nouvelles versions : au lancement puis toutes les 6 heures. Seul le numero de version est lu.
+    @objc private func checkForUpdate() {
+        var request = URLRequest(url: Updates.apiURL, timeoutInterval: 15)
+        request.setValue("claude-usage-widget/\(Updates.version)", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let data = data,
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let tag = json["tag_name"] as? String else { return }
+            let latest = tag.hasPrefix("v") || tag.hasPrefix("V") ? String(tag.dropFirst()) : tag
+            guard Updates.isNewer(latest, than: Updates.version) else { return }
+            self?.performSelector(onMainThread: #selector(AppDelegate.updateFound(_:)), with: latest as NSString,
+                                  waitUntilDone: false)
+        }.resume()
+    }
+
+    @objc private func updateFound(_ version: NSString) {
+        widget.updateVersion = version as String
+        widget.needsDisplay = true
+    }
+
+    @objc private func openReleases() {
+        NSWorkspace.shared.open(Updates.releasesURL)
     }
 
     @objc private func codexFinished(_ box: CodexResultBox) {
@@ -558,7 +754,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         panel.contentView = widget
         widget.contextMenu = menu
-        widget.onClick = { [weak self] in self?.widgetClicked() }
+        widget.onClick = { [weak self] point in self?.widgetClicked(at: point) }
 
         if !panel.setFrameUsingName("ClaudeUsageWidget"), let screen = NSScreen.main {
             let area = screen.visibleFrame
@@ -706,8 +902,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // ---------- Connexion ----------
 
-    private func widgetClicked() {
-        if claude.visible && claude.loginNeeded {
+    private func widgetClicked(at point: NSPoint) {
+        if widget.updateVersion != nil && widget.updateHit.contains(point) {
+            openReleases()
+        } else if claude.visible && claude.loginNeeded {
             openLogin()
         } else if -lastRefresh.timeIntervalSinceNow > 10 {
             refreshAll()
@@ -785,7 +983,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             if title.length > 0 { title.append(NSAttributedString(string: "  ", attributes: [.font: font])) }
             let attachment = NSTextAttachment()
             attachment.image = section.mascot.image(pixel: 2)
-            attachment.bounds = NSRect(x: 0, y: -3, width: 16, height: 16)
+            attachment.bounds = NSRect(x: 0, y: -3, width: 20, height: 16)
             title.append(NSAttributedString(attachment: attachment))
             title.append(NSAttributedString(string: " " + percentText(first.percent), attributes: [.font: font]))
         }
@@ -822,6 +1020,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
         menu.addItem(.separator())
 
+        if let version = widget.updateVersion {
+            add("Télécharger la mise à jour v\(version)", #selector(openReleases))
+            menu.addItem(.separator())
+        }
         add("Actualiser", #selector(refreshAll))
         add("Claude : se connecter / changer de compte", #selector(openLogin))
         menu.addItem(.separator())

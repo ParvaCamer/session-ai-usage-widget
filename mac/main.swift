@@ -139,6 +139,7 @@ struct Mascot {
     let inner: NSColor
     let detail: NSColor
     let animate: (Int, Mood) -> MascotFrame
+    let blink: (inout MascotFrame) -> Void // clignement de la pose fixe (barre de menu au repos)
 
     static let light = NSColor(srgbRed: 201 / 255, green: 209 / 255, blue: 217 / 255, alpha: 1)
     static let sweat = NSColor(srgbRed: 127 / 255, green: 179 / 255, blue: 255 / 255, alpha: 1)
@@ -150,13 +151,15 @@ struct Mascot {
         body: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1),
         inner: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1),
         detail: NSColor(srgbRed: 31 / 255, green: 30 / 255, blue: 29 / 255, alpha: 1),
-        animate: Mascot.claudeFrame)
+        animate: Mascot.claudeFrame,
+        blink: { $0.row(3, "..######..") })
 
     static let codex = Mascot(
         body: NSColor(srgbRed: 138 / 255, green: 180 / 255, blue: 248 / 255, alpha: 1),
         inner: NSColor(srgbRed: 27 / 255, green: 39 / 255, blue: 51 / 255, alpha: 1),
         detail: NSColor(srgbRed: 232 / 255, green: 234 / 255, blue: 237 / 255, alpha: 1),
-        animate: Mascot.codexFrame)
+        animate: Mascot.codexFrame,
+        blink: { Mascot.hideCursor(&$0) })
 
     static let claudeBase = ["....##....", "...####...", "..######..", "..#o##o#..",
                              "..######..", "..######..", "...####...", "..#....#.."]
@@ -281,8 +284,9 @@ struct Mascot {
     }
 
     // Dessine dans un repere ou y descend (vue retournee). frame avance toutes les 120 ms ; 0 donne la pose fixe.
-    func draw(at origin: NSPoint, pixel: CGFloat, frame: Int = 0, mood: Mood = .normal) {
-        let f = animate(frame, mood)
+    func draw(at origin: NSPoint, pixel: CGFloat, frame: Int = 0, mood: Mood = .normal, blink: Bool = false) {
+        var f = animate(frame, mood)
+        if blink { self.blink(&f) }
         for (row, line) in f.cells.enumerated() {
             for (col, character) in line.enumerated() {
                 let color: NSColor?
@@ -305,10 +309,16 @@ struct Mascot {
         }
     }
 
-    func image(pixel: CGFloat) -> NSImage {
+    // Image de la barre de menu : une marge de 2 pixels en haut (saut) et de 1 en bas et a droite
+    // (respiration, tremblement) pour que les animations ne soient jamais coupees.
+    static let imagePixels = (width: width + 1, height: 11, top: 2)
+
+    func image(pixel: CGFloat, frame: Int = 0, mood: Mood = .normal, blink: Bool = false) -> NSImage {
         let mascot = self
-        return NSImage(size: NSSize(width: CGFloat(Mascot.width) * pixel, height: 8 * pixel), flipped: true) { _ in
-            mascot.draw(at: .zero, pixel: pixel)
+        let size = NSSize(width: CGFloat(Self.imagePixels.width) * pixel, height: CGFloat(Self.imagePixels.height) * pixel)
+        return NSImage(size: size, flipped: true) { _ in
+            mascot.draw(at: NSPoint(x: 0, y: CGFloat(Self.imagePixels.top) * pixel), pixel: pixel, frame: frame, mood: mood,
+                        blink: blink)
             return true
         }
     }
@@ -706,7 +716,8 @@ final class WidgetView: NSView {
 
 // ---------- Application ----------
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSWindowDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate,
+                         NSMenuDelegate {
     private enum Step { case none, organizations, usage }
 
     private let baseURL = "https://claude.ai"
@@ -723,9 +734,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var lastRefresh = Date.distantPast
     private var updateDownloadURL: URL?
     private var updating = false
+    private var animationTick = 0
+    private var menuBarFrame = 0
 
     private var web: WKWebView!
     private var browserWindow: NSWindow!
+    private var popupWindows: [NSWindow] = []
+
+    // Google refuse les navigateurs integres : on se presente comme Safari, avec la version installee.
+    private static let safariUserAgent: String = {
+        let safari = Bundle(path: "/Applications/Safari.app")
+        let version = safari?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "18.0"
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            + "(KHTML, like Gecko) Version/\(version) Safari/605.1.15"
+    }()
     private var loginVisible = false
     private var step = Step.none
     private var orgId: String?
@@ -777,6 +799,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     @objc private func refreshAll() {
         lastRefresh = Date()
+        startMenuBarBurst()
         pollNow()
         pollCodex()
     }
@@ -892,8 +915,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func buildBrowser() {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         web = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 720), configuration: configuration)
         web.navigationDelegate = self
+        web.uiDelegate = self
+        web.customUserAgent = Self.safariUserAgent
 
         browserWindow = NSWindow(contentRect: web.frame, styleMask: [.titled, .closable, .resizable],
                                  backing: .buffered, defer: false)
@@ -1052,14 +1078,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         loginVisible = false
         loginTimer?.invalidate()
         loginTimer = nil
+        popupWindows.forEach { $0.orderOut(nil) }
+        popupWindows.removeAll()
         browserWindow.orderOut(nil)
     }
 
     // Le navigateur sert aussi aux mises a jour : fermer la fenetre ne fait que la masquer.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender !== browserWindow {
+            popupWindows.removeAll { $0 === sender }
+            return true
+        }
         closeLogin()
         pollNow()
         return false
+    }
+
+    // "Continuer avec Google" ouvre une fenetre popup : sans elle, claude.ai affiche une erreur de connexion.
+    // La configuration recue doit etre reutilisee telle quelle pour garder le lien avec la page de claude.ai.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        let width = windowFeatures.width?.doubleValue ?? 500
+        let height = windowFeatures.height?.doubleValue ?? 640
+        let popup = WKWebView(frame: NSRect(x: 0, y: 0, width: width, height: height), configuration: configuration)
+        popup.uiDelegate = self
+        popup.customUserAgent = Self.safariUserAgent
+
+        let window = NSWindow(contentRect: popup.frame, styleMask: [.titled, .closable, .resizable],
+                              backing: .buffered, defer: false)
+        window.title = "Connexion"
+        window.contentView = popup
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        popupWindows.append(window)
+        return popup
+    }
+
+    // La popup Google se ferme d'elle-meme (window.close) une fois la connexion terminee.
+    func webViewDidClose(_ webView: WKWebView) {
+        guard let window = popupWindows.first(where: { $0.contentView === webView }) else { return }
+        popupWindows.removeAll { $0 === window }
+        window.orderOut(nil)
     }
 
     // ---------- Affichage ----------
@@ -1081,23 +1143,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         widget.needsDisplay = true
     }
 
-    // Les mascottes ne bougent que si le widget est vraiment visible a l'ecran.
-    @objc private func animate() {
-        guard panel.isVisible, panel.occlusionState.contains(.visible) else { return }
-        widget.animationFrame += 1
-        widget.needsDisplay = true
+    // Les mascottes ne bougent que la ou elles sont vraiment visibles a l'ecran.
+    // Barre de menu : la boucle complete se joue a chaque actualisation (toutes les 2 minutes) ;
+    // entre deux, la mascotte cligne simplement des yeux toutes les 4 secondes environ.
+    private let menuBarBurstLength = 96 // une boucle complete de Claude, environ 11 secondes
+    private let blinkEvery = 34         // en images de 120 ms
+    private let blinkLength = 2
+    private var menuBarBurstStart: Int?
+    private var menuBarBlink = false
+
+    private func startMenuBarBurst() {
+        menuBarBurstStart = animationTick
     }
 
-    private func refreshDisplay() {
-        // Barre de menu : la mascotte et le premier pourcentage de chaque outil affiche.
+    @objc private func animate() {
+        animationTick += 1
+        if panel.isVisible, panel.occlusionState.contains(.visible) {
+            widget.animationFrame = animationTick
+            widget.needsDisplay = true
+        }
+
+        let previous = (frame: menuBarFrame, blink: menuBarBlink)
+        if let start = menuBarBurstStart, animationTick - start < menuBarBurstLength {
+            menuBarFrame = animationTick - start + 1
+            menuBarBlink = false
+        } else {
+            menuBarBurstStart = nil
+            menuBarFrame = 0
+            menuBarBlink = animationTick % blinkEvery < blinkLength
+        }
+
+        // Pendant la boucle, une image sur deux (environ 4 fois par seconde) ; au repos, seulement quand l'image change.
+        let changed = menuBarFrame != previous.frame || menuBarBlink != previous.blink
+        let due = menuBarFrame == 0 ? changed : (menuBarFrame % 2 == 1 || menuBarFrame == menuBarBurstLength)
+        if due, let window = statusItem.button?.window, window.occlusionState.contains(.visible) {
+            updateMenuBar()
+        }
+    }
+
+    // Barre de menu : la mascotte et le premier pourcentage de chaque outil affiche.
+    private func updateMenuBar() {
+        let pixel: CGFloat = 2
+        let mascotSize = NSSize(width: CGFloat(Mascot.imagePixels.width) * pixel,
+                                height: CGFloat(Mascot.imagePixels.height) * pixel)
+        // Les pieds de la pose de repos restent a la meme hauteur qu'avant l'ajout des marges.
+        let bottomMargin = CGFloat(Mascot.imagePixels.height - Mascot.imagePixels.top - 8) * pixel
         let title = NSMutableAttributedString()
         let font = NSFont.menuBarFont(ofSize: 0)
         for section in widget.sections where section.visible {
             guard let first = section.limits.first else { continue }
             if title.length > 0 { title.append(NSAttributedString(string: "  ", attributes: [.font: font])) }
             let attachment = NSTextAttachment()
-            attachment.image = section.mascot.image(pixel: 2)
-            attachment.bounds = NSRect(x: 0, y: -3, width: 20, height: 16)
+            attachment.image = section.mascot.image(pixel: pixel, frame: menuBarFrame,
+                                                    mood: Mascot.mood(of: section.limits), blink: menuBarBlink)
+            attachment.bounds = NSRect(origin: NSPoint(x: 0, y: -3 - bottomMargin), size: mascotSize)
             title.append(NSAttributedString(attachment: attachment))
             title.append(NSAttributedString(string: " " + percentText(first.percent), attributes: [.font: font]))
         }
@@ -1106,6 +1205,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         } else {
             statusItem.button?.title = claude.visible && claude.loginNeeded ? "Claude ?" : "Claude…"
         }
+    }
+
+    private func refreshDisplay() {
+        updateMenuBar()
 
         // Le coin haut gauche reste fixe quand le nombre de lignes change.
         let height = widget.preferredHeight

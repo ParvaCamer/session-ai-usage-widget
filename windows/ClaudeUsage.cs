@@ -692,7 +692,7 @@ namespace ClaudeUsage
     // Verifie sur GitHub si une version plus recente est publiee. Rien d'autre n'est envoye.
     static class Updates
     {
-        public const string Version = "1.0.0";
+        public const string Version = "1.0.1";
         public const string ReleasesUrl = "https://github.com/ParvaCamer/session-ai-usage-widget/releases/latest";
         const string ApiUrl = "https://api.github.com/repos/ParvaCamer/session-ai-usage-widget/releases/latest";
 

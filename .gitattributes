@@ -4,3 +4,5 @@
 *.yml text eol=lf
 *.bat text eol=crlf
 *.dll binary
+*.ico binary
+*.icns binary

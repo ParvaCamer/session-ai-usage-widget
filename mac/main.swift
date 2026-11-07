@@ -326,7 +326,7 @@ struct Mascot {
 
 // Verifie sur GitHub si une version plus recente est publiee. Rien d'autre n'est envoye.
 enum Updates {
-    static let version = "1.0.1"
+    static let version = "1.0.2"
     static let releasesURL = URL(string: "https://github.com/ParvaCamer/session-ai-usage-widget/releases/latest")!
     static let apiURL = URL(string: "https://api.github.com/repos/ParvaCamer/session-ai-usage-widget/releases/latest")!
     static let arrow = ["..###..", "..###..", "..###..", "#######", ".#####.", "..###..", "...#...", "#######"]

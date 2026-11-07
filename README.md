@@ -55,7 +55,9 @@ Les 3 DLL doivent rester à côté du `.exe`. Si « Continuer avec Google » est
 
 **Pendant un jeu :** le widget se masque seulement si le plein écran occupe le même écran que lui, et réapparaît sans prendre le focus. Sur l'autre écran, il reste affiché et continue de se mettre à jour. Une vidéo en plein écran a le même effet.
 
-**Avec l'app Claude ou Codex :** l'option « Se lancer avec l'app Claude ou Codex » démarre le widget avec Windows. Il reste invisible et presque sans consommation tant qu'aucune des deux apps cochées n'est ouverte, puis apparaît quand tu en ouvres une, quelle que soit la façon de l'ouvrir. Une app réduite dans la zone de notification compte comme ouverte. Si tu cliques sur « Quitter », le widget ne revient qu'au prochain démarrage de Windows, ou en relançant le `.exe`. Cette option n'existe que sous Windows.
+**Avec l'app Claude ou Codex :** l'option « Se lancer avec l'app Claude ou Codex » démarre le widget avec Windows. Il reste invisible et presque sans consommation tant qu'aucune des deux apps cochées n'est ouverte, puis apparaît quand tu en ouvres une, quelle que soit la façon de l'ouvrir. Une app réduite dans la zone de notification compte comme ouverte. Si tu cliques sur « Quitter », le widget ne revient qu'au prochain démarrage de Windows, ou en relançant le `.exe`.
+
+Sur macOS, la même option se trouve dans le menu du widget, à côté de « Lancer à l'ouverture de session » : les deux s'excluent. Le widget s'ouvre avec ta session, puis reste caché (ni widget ni icône dans la barre de menus) tant que ni Claude ni Codex n'est ouvert. Codex lancé dans un terminal compte aussi. Il réapparaît dès que l'une des deux apps s'ouvre, et se cache de nouveau quand elles se ferment. Ouvrir « Claude Usage » à la main l'affiche tout de suite, comme un lancement normal.
 
 ## Bon à savoir
 
@@ -77,7 +79,7 @@ Les 3 DLL doivent rester à côté du `.exe`. Si « Continuer avec Google » est
 
 **macOS**
 
-1. Dans le menu du widget : décoche le lancement à l'ouverture de session, puis Quitter.
+1. Dans le menu du widget : décoche « Lancer à l'ouverture de session » ou « Se lancer avec l'app Claude ou Codex », puis Quitter.
 2. Supprime `Claude Usage` du dossier `Applications`.
 
 ## Licences

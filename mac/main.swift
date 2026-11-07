@@ -425,6 +425,60 @@ enum SelfUpdater {
     }
 }
 
+// Option « Se lancer avec l'app Claude ou Codex » : le widget s'ouvre avec la session, comme avec « Lancer a
+// l'ouverture de session », mais reste cache (ni widget ni barre de menu, aucune lecture) tant que ni Claude ni
+// Codex n'est ouvert, puis apparait des que l'un des deux s'ouvre, quelle que soit la facon de l'ouvrir.
+// Un agent launchd avec un argument serait plus direct, mais macOS refuse de le lancer des que la signature
+// locale change, c'est-a-dire a chaque mise a jour.
+enum LaunchWithApps {
+    static let argument = "--with-apps" // meme effet sans ouverture de session, pour tester
+    static let defaultsKey = "launchWithApps"
+
+    static var enabled: Bool {
+        get { UserDefaults.standard.bool(forKey: defaultsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
+    }
+
+    // Vrai si macOS vient d'ouvrir l'app parce qu'elle fait partie des elements ouverts a la connexion.
+    static func launchedAtLogin() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventID == kAEOpenApplication else { return false }
+        return event.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+    }
+
+    static let claudeBundle = "com.anthropic.claudefordesktop"
+    static let codexBundle = "com.openai.codex"
+
+    static func claudeRunning() -> Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: claudeBundle).isEmpty
+    }
+
+    static func codexRunning() -> Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: codexBundle).isEmpty || codexCommandRunning()
+    }
+
+    // Codex dans un terminal : un processus « codex » qui n'est pas celui que le widget lance pour lire les limites.
+    private static func codexCommandRunning() -> Bool {
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else { return false }
+        var pids = [pid_t](repeating: 0, count: Int(count) + 64)
+        let filled = pids.withUnsafeMutableBufferPointer {
+            proc_listallpids($0.baseAddress, Int32($0.count * MemoryLayout<pid_t>.size))
+        }
+        let me = UInt32(getpid())
+        for pid in pids.prefix(Int(max(0, filled))) where pid > 0 {
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_ppid != me else { continue }
+            let name = withUnsafeBytes(of: info.pbi_comm) { bytes in
+                String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+            }
+            if name == "codex" { return true }
+        }
+        return false
+    }
+}
+
 // Une partie du widget par outil suivi.
 final class Section {
     let name: String
@@ -732,6 +786,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private let codex = Section(name: "Codex", mascot: .codex)
     private var codexBusy = false
     private var lastRefresh = Date.distantPast
+    private var waitForApps = false
+    private var hiddenByApps = false
     private var updateDownloadURL: URL?
     private var updating = false
     private var animationTick = 0
@@ -768,7 +824,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        waitForApps = CommandLine.arguments.contains(LaunchWithApps.argument)
+            || (LaunchWithApps.enabled && LaunchWithApps.launchedAtLogin())
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.isVisible = true // macOS retient le masquage : un arret pendant l'attente ne doit pas le garder
         statusItem.button?.title = "Claude…"
         menu.delegate = self
         statusItem.menu = menu
@@ -794,10 +854,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                              userInfo: nil, repeats: true)
         checkForUpdate()
         refreshDisplay()
+
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            workspace.addObserver(self, selector: #selector(updateAppsVisibility), name: name, object: nil)
+        }
+        // Codex dans un terminal n'envoie aucune notification : on regarde aussi toutes les 5 secondes.
+        Timer.scheduledTimer(timeInterval: 5, target: self, selector: #selector(updateAppsVisibility),
+                             userInfo: nil, repeats: true)
+        updateAppsVisibility()
         refreshAll()
     }
 
+    // Mode « avec l'app Claude ou Codex » : tout est masque tant qu'aucune des apps affichees n'est ouverte.
+    @objc private func updateAppsVisibility() {
+        let appsOpen = !waitForApps
+            || (claude.visible && LaunchWithApps.claudeRunning())
+            || (codex.visible && LaunchWithApps.codexRunning())
+        guard appsOpen == hiddenByApps else { return }
+        hiddenByApps = !appsOpen
+        statusItem.isVisible = appsOpen
+        applyWidgetVisibility()
+        if appsOpen {
+            refreshAll()
+        } else if !loginVisible {
+            finishPoll()
+            load("about:blank")
+        }
+    }
+
+    // Ouvrir l'app a la main alors qu'elle attend Claude ou Codex : elle s'affiche tout de suite, comme un lancement normal.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if waitForApps {
+            waitForApps = false
+            updateAppsVisibility()
+        }
+        return false
+    }
+
     @objc private func refreshAll() {
+        guard !hiddenByApps else { return }
         lastRefresh = Date()
         startMenuBarBurst()
         pollNow()
@@ -909,7 +1005,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func applyWidgetVisibility() {
-        if showWidget { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
+        if showWidget && !hiddenByApps { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
     }
 
     private func buildBrowser() {
@@ -1252,8 +1348,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         menu.addItem(.separator())
         add("Afficher le widget sur le bureau", #selector(toggleWidget), checked: showWidget)
         add("Toujours au premier plan", #selector(toggleTopMost), checked: alwaysOnTop)
+        let opensAtLogin = SMAppService.mainApp.status == .enabled
         add("Lancer à l'ouverture de session", #selector(toggleLaunchAtLogin),
-            checked: SMAppService.mainApp.status == .enabled)
+            checked: opensAtLogin && !LaunchWithApps.enabled)
+        add("Se lancer avec l'app Claude ou Codex", #selector(toggleLaunchWithApps),
+            checked: opensAtLogin && LaunchWithApps.enabled)
         menu.addItem(.separator())
         add("Quitter", #selector(quit))
     }
@@ -1289,15 +1388,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         applyWindowLevel()
     }
 
+    // Les deux options passent par l'ouverture de session et s'excluent : en cocher une decoche l'autre.
     @objc private func toggleLaunchAtLogin() {
+        setOpenAtLogin(!(SMAppService.mainApp.status == .enabled && !LaunchWithApps.enabled), withApps: false)
+    }
+
+    @objc private func toggleLaunchWithApps() {
+        setOpenAtLogin(!(SMAppService.mainApp.status == .enabled && LaunchWithApps.enabled), withApps: true)
+    }
+
+    private func setOpenAtLogin(_ open: Bool, withApps: Bool) {
         do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
+            if open {
+                if SMAppService.mainApp.status != .enabled { try SMAppService.mainApp.register() }
+                LaunchWithApps.enabled = withApps
             } else {
-                try SMAppService.mainApp.register()
+                try SMAppService.mainApp.unregister()
+                LaunchWithApps.enabled = false
             }
         } catch {
             showProblem("Démarrage auto impossible : \(error.localizedDescription)")
+        }
+        if SMAppService.mainApp.status == .requiresApproval {
+            showProblem("Autorise Claude Usage dans Réglages Système > Général > Ouverture")
+            SMAppService.openSystemSettingsLoginItems()
+        }
+        // Option decochee alors que le widget attendait Claude ou Codex : il s'affiche jusqu'a sa fermeture.
+        if waitForApps && !LaunchWithApps.enabled {
+            waitForApps = false
+            updateAppsVisibility()
         }
     }
 

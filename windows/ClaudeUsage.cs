@@ -956,6 +956,17 @@ namespace ClaudeUsage
         readonly System.Windows.Forms.Timer fullscreenTimer = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer animTimer = new System.Windows.Forms.Timer();
         readonly List<Rectangle> mascotAreas = new List<Rectangle>();
+
+        // Reduction du widget : collapse va de 0 (deplie) a 1 (replie), anime en 200 ms.
+        const int CollapseMs = 200;
+        bool collapsed;
+        float collapse;
+        float collapseFrom;
+        float collapseTo;
+        bool chevronHover;
+        Rectangle chevronHit;
+        readonly System.Diagnostics.Stopwatch collapseClock = new System.Diagnostics.Stopwatch();
+        readonly System.Windows.Forms.Timer collapseTimer = new System.Windows.Forms.Timer();
         int animFrame;
         readonly System.Windows.Forms.Timer updateTimer = new System.Windows.Forms.Timer();
         readonly ToolStripMenuItem updateItem = new ToolStripMenuItem();
@@ -1006,6 +1017,9 @@ namespace ClaudeUsage
             repaintTimer.Tick += delegate { Invalidate(); };
             fullscreenTimer.Interval = 3000;
             fullscreenTimer.Tick += delegate { UpdateState(); };
+
+            collapseTimer.Interval = 15;
+            collapseTimer.Tick += delegate { CollapseStep(); };
 
             updateTimer.Interval = 6 * 60 * 60 * 1000; // nouvelles versions : toutes les 6 heures
             updateTimer.Tick += delegate { CheckForUpdate(); };
@@ -1465,8 +1479,57 @@ namespace ClaudeUsage
         const float MessageHeight = 44f;
         const float HeaderHeight = 22f;
         const float SectionGap = 10f;
+        const float CollapsedGap = 4f;
 
+        // Hauteur affichee : glisse de la hauteur depliee jusqu'a la seule ligne d'en-tete.
         float SectionHeight(Section s)
+        {
+            return Lerp(ExpandedHeight(s), HeaderHeight, collapse);
+        }
+
+        float CurrentGap()
+        {
+            return Lerp(SectionGap, CollapsedGap, collapse);
+        }
+
+        static float Lerp(float a, float b, float t)
+        {
+            return a + (b - a) * t;
+        }
+
+        void ToggleCollapse()
+        {
+            collapsed = !collapsed;
+            collapseFrom = collapse;
+            collapseTo = collapsed ? 1f : 0f;
+            collapseClock.Restart();
+            collapseTimer.Start();
+            SaveSettings();
+        }
+
+        // Une image de l'animation, avec un ralenti en fin de course.
+        void CollapseStep()
+        {
+            float t = Math.Min(1f, collapseClock.ElapsedMilliseconds / (float)CollapseMs);
+            float eased = 1f - (float)Math.Pow(1 - t, 3);
+            collapse = Lerp(collapseFrom, collapseTo, eased);
+            if (t >= 1f)
+            {
+                collapse = collapseTo;
+                collapseTimer.Stop();
+            }
+            UpdateShape();
+        }
+
+        // Pour le mode demo : fige l'animation a un instant donne (0 deplie, 1 replie).
+        public void SetCollapseForDemo(float value)
+        {
+            collapse = value;
+            collapsed = value >= 0.5f;
+            UpdateShape();
+        }
+
+        float ExpandedHeight(Section s)
         {
             float h = HeaderHeight;
             if (s.Rows.Count > 0)
@@ -1488,7 +1551,7 @@ namespace ClaudeUsage
             foreach (Section s in new[] { claude, codex })
             {
                 if (!s.Visible) continue;
-                if (shown++ > 0) h += SectionGap;
+                if (shown++ > 0) h += CurrentGap();
                 h += SectionHeight(s);
             }
             if (shown == 0) h += MessageHeight;
@@ -1538,8 +1601,8 @@ namespace ClaudeUsage
             foreach (Section s in new[] { claude, codex })
             {
                 if (!s.Visible) continue;
-                if (shown++ > 0) y += S(SectionGap);
-                DrawSection(g, s, x, y, w);
+                if (shown++ > 0) y += S(CurrentGap());
+                DrawSection(g, s, x, y, w, shown == 1);
                 y += S(SectionHeight(s));
             }
 
@@ -1550,6 +1613,39 @@ namespace ClaudeUsage
             }
 
             if (updateVersion != null) DrawUpdateArrow(g);
+            DrawChevron(g);
+        }
+
+        // Place laissee a droite de la premiere ligne pour le chevron (et la fleche de mise a jour).
+        float TopRightReserve()
+        {
+            float reserve = S(18);
+            if (updateVersion != null) reserve += Updates.Arrow[0].Length * Math.Max(2, S(2)) + S(8);
+            return reserve;
+        }
+
+        // Chevron en haut a droite : pointe vers le haut quand le widget est deplie, pivote pendant l'animation.
+        void DrawChevron(Graphics g)
+        {
+            float size = S(10);
+            float cx = Width - S(Pad) - size / 2f;
+            float cy = S(Pad) + S(HeaderHeight) / 2f - S(2);
+
+            GraphicsState state = g.Save();
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TranslateTransform(cx, cy);
+            g.RotateTransform(180f * collapse);
+            using (var pen = new Pen(chevronHover ? TextMain : TextMuted, Math.Max(1.5f, S(2))))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                pen.LineJoin = LineJoin.Round;
+                g.DrawLines(pen, new[] { new PointF(-size / 2, size / 4), new PointF(0, -size / 4), new PointF(size / 2, size / 4) });
+            }
+            g.Restore(state);
+
+            int hit = Math.Max(S(24), (int)size + S(10));
+            chevronHit = new Rectangle((int)(cx - hit / 2f), (int)(cy - hit / 2f), hit, hit);
         }
 
         // Fleche de telechargement en haut a droite, qui rebondit doucement. Un clic ouvre la page des versions.
@@ -1557,7 +1653,7 @@ namespace ClaudeUsage
         {
             int pixel = Math.Max(2, S(2));
             int width = Updates.Arrow[0].Length * pixel;
-            int left = Width - S(Pad) - width;
+            int left = Width - S(Pad) - width - S(18); // a gauche du chevron
             int top = S(Pad) + S(2) + (!updating && (animFrame / 4) % 2 == 1 ? pixel : 0);
             SmoothingMode previous = g.SmoothingMode;
             g.SmoothingMode = SmoothingMode.None; // sans lissage, sinon les pixels laissent des joints
@@ -1574,8 +1670,9 @@ namespace ClaudeUsage
             mascotAreas.Add(new Rectangle(left - 1, S(Pad), width + 2, 10 * pixel + 2));
         }
 
-        void DrawSection(Graphics g, Section s, float x, float y, float w)
+        void DrawSection(Graphics g, Section s, float x, float y, float w, bool first)
         {
+            float top = y;
             int pixel = Math.Max(2, S(2));
             float mascotY = y + (S(HeaderHeight) - 8 * pixel) / 2f - S(2);
             s.Mascot.Draw(g, x, mascotY, pixel, animFrame, Mascot.MoodOf(s.Rows));
@@ -1584,7 +1681,13 @@ namespace ClaudeUsage
                 (Mascot.Width + 2) * pixel + 2, 12 * pixel + 2));
             using (var main = new SolidBrush(TextMuted))
                 DrawText(g, s.Name, fontValue, main, x + Mascot.Width * pixel + S(4), y, w, S(HeaderHeight));
+            if (collapse > 0) DrawSummary(g, s, x, y, w, first);
             y += S(HeaderHeight);
+            if (collapse >= 1f) return;
+
+            // Pendant l'animation, le detail glisse sous l'en-tete et s'efface en fondu.
+            GraphicsState state = g.Save();
+            g.SetClip(new RectangleF(0, y, Width, Math.Max(0, top + S(SectionHeight(s)) - y)));
 
             foreach (Limit row in s.Rows)
             {
@@ -1602,6 +1705,46 @@ namespace ClaudeUsage
             {
                 using (var b = new SolidBrush(s.NeedLogin ? Accent : TextMuted))
                     DrawText(g, s.Message ?? "", fontLabel, b, x, y, w, S(MessageHeight));
+            }
+
+            if (collapse > 0)
+            {
+                using (var veil = new SolidBrush(Color.FromArgb((int)(255 * collapse), Bg)))
+                    g.FillRectangle(veil, 0, top + S(HeaderHeight), Width, S(ExpandedHeight(s)));
+            }
+            g.Restore(state);
+        }
+
+        // Version repliee : les pourcentages sur la ligne d'en-tete, qui apparaissent en fondu.
+        void DrawSummary(Graphics g, Section s, float x, float y, float w, bool first)
+        {
+            string text;
+            Color color;
+            if (s.Rows.Count == 0)
+            {
+                text = s.NeedLogin ? "connexion" : "–";
+                color = s.NeedLogin ? Accent : TextMuted;
+            }
+            else
+            {
+                var parts = new List<string>();
+                double max = 0;
+                foreach (Limit l in s.Rows)
+                {
+                    parts.Add(Math.Round(l.Percent).ToString(CultureInfo.InvariantCulture) + " %");
+                    max = Math.Max(max, l.Percent);
+                }
+                text = string.Join(" · ", parts.ToArray());
+                color = max >= 90 ? Danger : max >= 70 ? Warn : TextMain;
+            }
+
+            float reserve = first ? TopRightReserve() : 0;
+            using (var brush = new SolidBrush(Color.FromArgb((int)(255 * Math.Min(1f, collapse)), color)))
+            using (var format = new StringFormat(StringFormatFlags.NoWrap))
+            {
+                format.Alignment = StringAlignment.Far;
+                format.LineAlignment = StringAlignment.Center;
+                g.DrawString(text, fontLabel, brush, new RectangleF(x, y - S(2), w - reserve, S(HeaderHeight)), format);
             }
         }
 
@@ -1678,6 +1821,12 @@ namespace ClaudeUsage
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
 
+            if (chevronHit.Contains(e.Location))
+            {
+                ToggleCollapse();
+                return;
+            }
+
             if (updateVersion != null && updateHit.Contains(e.Location))
             {
                 StartUpdate();
@@ -1699,6 +1848,31 @@ namespace ClaudeUsage
             else if ((DateTime.Now - lastRefresh).TotalSeconds > 10)
             {
                 RefreshAll();
+            }
+        }
+
+        // Survol : le chevron s'eclaircit et le curseur devient une main sur les boutons.
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            bool overChevron = chevronHit.Contains(e.Location);
+            bool overButton = overChevron || (updateVersion != null && updateHit.Contains(e.Location));
+            Cursor = overButton ? Cursors.Hand : Cursors.Default;
+            if (overChevron != chevronHover)
+            {
+                chevronHover = overChevron;
+                Invalidate(chevronHit);
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            Cursor = Cursors.Default;
+            if (chevronHover)
+            {
+                chevronHover = false;
+                Invalidate(chevronHit);
             }
         }
 
@@ -1788,6 +1962,11 @@ namespace ClaudeUsage
                             claude.Visible = parts[3] == "1";
                             codex.Visible = parts[4] == "1";
                         }
+                        if (parts.Length >= 6)
+                        {
+                            collapsed = parts[5] == "1";
+                            collapse = collapsed ? 1f : 0f;
+                        }
                         // L'ecran a pu etre debranche depuis : on ne replace le widget que s'il reste visible.
                         foreach (Screen s in Screen.AllScreens)
                             if (s.WorkingArea.Contains(new Point(saved.X + S(20), saved.Y + S(20)))) pos = saved;
@@ -1810,7 +1989,8 @@ namespace ClaudeUsage
             {
                 Directory.CreateDirectory(DataDir);
                 File.WriteAllText(SettingsPath, Location.X + " " + Location.Y + " " + (TopMost ? "1" : "0")
-                    + " " + (claude.Visible ? "1" : "0") + " " + (codex.Visible ? "1" : "0"));
+                    + " " + (claude.Visible ? "1" : "0") + " " + (codex.Visible ? "1" : "0")
+                    + " " + (collapsed ? "1" : "0"));
             }
             catch (IOException) { }
         }
@@ -1907,6 +2087,8 @@ namespace ClaudeUsage
                 if (hasCodex) form.SetCodexRows(CodexClient.ParseResult((Dictionary<string, object>)part).Rows);
                 form.SetVisibleSections(hasClaude, hasCodex);
                 if (json.TryGetValue("update", out part) && part is string) form.SetUpdateForDemo((string)part);
+                if (json.TryGetValue("collapse", out part) && part != null)
+                    form.SetCollapseForDemo(Convert.ToSingle(part, CultureInfo.InvariantCulture));
                 using (var bmp = new Bitmap(form.Width, form.Height))
                 using (Graphics g = Graphics.FromImage(bmp))
                 {

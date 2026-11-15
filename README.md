@@ -53,6 +53,8 @@ Les 3 DLL doivent rester à côté du `.exe`. Si « Continuer avec Google » est
 | Clic | Actualise, ou ouvre la connexion si elle est demandée |
 | Clic droit | Menu : actualiser, compte Claude, outils affichés, premier plan, lancement automatique, quitter |
 
+**Replier le widget :** le chevron en haut à droite réduit le widget à une ligne par outil (mascotte, nom et pourcentages), avec une petite animation. Un nouveau clic le déplie, et le widget se rouvre comme tu l'as laissé.
+
 **Pendant un jeu :** le widget se masque seulement si le plein écran occupe le même écran que lui, et réapparaît sans prendre le focus. Sur l'autre écran, il reste affiché et continue de se mettre à jour. Une vidéo en plein écran a le même effet.
 
 **Avec l'app Claude ou Codex :** l'option « Se lancer avec l'app Claude ou Codex » démarre le widget avec Windows. Il reste invisible et presque sans consommation tant qu'aucune des deux apps cochées n'est ouverte, puis apparaît quand tu en ouvres une, quelle que soit la façon de l'ouvrir. Une app réduite dans la zone de notification compte comme ouverte. Si tu cliques sur « Quitter », le widget ne revient qu'au prochain démarrage de Windows, ou en relançant le `.exe`.
